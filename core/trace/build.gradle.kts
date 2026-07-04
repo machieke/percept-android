@@ -11,6 +11,7 @@ dependencies {
     implementation(project(":core:da"))
     implementation(libs.coroutines.core)
     testImplementation(libs.junit)
+    testImplementation(libs.coroutines.test)
 }
 
 tasks.test {
