@@ -3,6 +3,7 @@
 .kotlin/
 build/
 **/build/
+**/.cxx/
 local.properties
 .android-sdk/
 reference/event-trace-memory/
