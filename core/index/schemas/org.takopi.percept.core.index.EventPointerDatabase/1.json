@@ -1,0 +1,351 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "98acbd80d47a8069e3aed3163cc68a78",
+    "entities": [
+      {
+        "tableName": "event_pointers",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`eventId` TEXT NOT NULL, `eventCid` TEXT NOT NULL, `payloadCid` TEXT NOT NULL, `timeYear` INTEGER NOT NULL, `timeMonth` INTEGER NOT NULL, `timeDay` INTEGER NOT NULL, `timeHour` INTEGER NOT NULL, `actorPath` TEXT NOT NULL, `channelPath` TEXT NOT NULL, `valueKind` TEXT NOT NULL, `rootEventId` TEXT NOT NULL, `inputEventIds` TEXT NOT NULL, `outputArtifactIds` TEXT NOT NULL, `pointerJson` TEXT NOT NULL, `dispatchState` TEXT NOT NULL, PRIMARY KEY(`eventId`))",
+        "fields": [
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventCid",
+            "columnName": "eventCid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "payloadCid",
+            "columnName": "payloadCid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timeYear",
+            "columnName": "timeYear",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timeMonth",
+            "columnName": "timeMonth",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timeDay",
+            "columnName": "timeDay",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timeHour",
+            "columnName": "timeHour",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actorPath",
+            "columnName": "actorPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "channelPath",
+            "columnName": "channelPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "valueKind",
+            "columnName": "valueKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rootEventId",
+            "columnName": "rootEventId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "inputEventIds",
+            "columnName": "inputEventIds",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outputArtifactIds",
+            "columnName": "outputArtifactIds",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pointerJson",
+            "columnName": "pointerJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dispatchState",
+            "columnName": "dispatchState",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "eventId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_event_pointers_eventCid",
+            "unique": true,
+            "columnNames": [
+              "eventCid"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_event_pointers_eventCid` ON `${TABLE_NAME}` (`eventCid`)"
+          },
+          {
+            "name": "index_event_pointers_payloadCid",
+            "unique": false,
+            "columnNames": [
+              "payloadCid"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_event_pointers_payloadCid` ON `${TABLE_NAME}` (`payloadCid`)"
+          },
+          {
+            "name": "index_event_pointers_rootEventId",
+            "unique": false,
+            "columnNames": [
+              "rootEventId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_event_pointers_rootEventId` ON `${TABLE_NAME}` (`rootEventId`)"
+          },
+          {
+            "name": "index_event_pointers_valueKind",
+            "unique": false,
+            "columnNames": [
+              "valueKind"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_event_pointers_valueKind` ON `${TABLE_NAME}` (`valueKind`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "time_prefix_keys",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`prefixKey` TEXT NOT NULL, `eventId` TEXT NOT NULL, PRIMARY KEY(`prefixKey`, `eventId`), FOREIGN KEY(`eventId`) REFERENCES `event_pointers`(`eventId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "prefixKey",
+            "columnName": "prefixKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "prefixKey",
+            "eventId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_time_prefix_keys_eventId",
+            "unique": false,
+            "columnNames": [
+              "eventId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_time_prefix_keys_eventId` ON `${TABLE_NAME}` (`eventId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "event_pointers",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "eventId"
+            ],
+            "referencedColumns": [
+              "eventId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "actor_prefix_keys",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`prefixKey` TEXT NOT NULL, `eventId` TEXT NOT NULL, PRIMARY KEY(`prefixKey`, `eventId`), FOREIGN KEY(`eventId`) REFERENCES `event_pointers`(`eventId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "prefixKey",
+            "columnName": "prefixKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "prefixKey",
+            "eventId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_actor_prefix_keys_eventId",
+            "unique": false,
+            "columnNames": [
+              "eventId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_actor_prefix_keys_eventId` ON `${TABLE_NAME}` (`eventId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "event_pointers",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "eventId"
+            ],
+            "referencedColumns": [
+              "eventId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "channel_prefix_keys",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`prefixKey` TEXT NOT NULL, `eventId` TEXT NOT NULL, PRIMARY KEY(`prefixKey`, `eventId`), FOREIGN KEY(`eventId`) REFERENCES `event_pointers`(`eventId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "prefixKey",
+            "columnName": "prefixKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "prefixKey",
+            "eventId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_channel_prefix_keys_eventId",
+            "unique": false,
+            "columnNames": [
+              "eventId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_channel_prefix_keys_eventId` ON `${TABLE_NAME}` (`eventId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "event_pointers",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "eventId"
+            ],
+            "referencedColumns": [
+              "eventId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "parent_event_ids",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`parentEventId` TEXT NOT NULL, `eventId` TEXT NOT NULL, PRIMARY KEY(`parentEventId`, `eventId`), FOREIGN KEY(`eventId`) REFERENCES `event_pointers`(`eventId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "parentEventId",
+            "columnName": "parentEventId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "parentEventId",
+            "eventId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_parent_event_ids_eventId",
+            "unique": false,
+            "columnNames": [
+              "eventId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_parent_event_ids_eventId` ON `${TABLE_NAME}` (`eventId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "event_pointers",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "eventId"
+            ],
+            "referencedColumns": [
+              "eventId"
+            ]
+          }
+        ]
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '98acbd80d47a8069e3aed3163cc68a78')"
+    ]
+  }
+}
