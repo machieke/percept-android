@@ -25,3 +25,12 @@ tasks.register<JavaExec>("exportParityFixture") {
     mainClass.set("org.takopi.percept.core.trace.ParityFixtureExporterKt")
     args(layout.buildDirectory.dir("parity-fixture-bundle").get().asFile.absolutePath)
 }
+
+tasks.register<JavaExec>("exportSyntheticM6Bundle") {
+    group = "verification"
+    description = "Export a deterministic 5-minute multimodal M6 synthetic bundle."
+    dependsOn("classes")
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("org.takopi.percept.core.trace.SyntheticM6BundleExporterKt")
+    args(layout.buildDirectory.dir("synthetic-m6-bundle").get().asFile.absolutePath)
+}
