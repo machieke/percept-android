@@ -24,5 +24,7 @@ kotlin {
 
 dependencies {
     implementation(project(":core:trace"))
+    implementation(libs.camerax.core)
+    implementation(libs.mediapipe.tasks.vision)
     testImplementation(libs.junit)
 }
