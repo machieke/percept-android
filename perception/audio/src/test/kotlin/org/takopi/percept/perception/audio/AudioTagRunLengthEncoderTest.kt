@@ -27,7 +27,7 @@ class AudioTagRunLengthEncoderTest {
     fun suppressesSpeechClassWhenAsrIsActive() {
         val encoder = AudioTagRunLengthEncoder(thresholdPerMille = 300)
 
-        assertNull(encoder.process(frame("Speech", 700, 0, asrActive = true)))
+        assertNull(encoder.process(frame(" speech ", 700, 0, asrActive = true)))
         assertNull(encoder.closeOpen())
     }
 

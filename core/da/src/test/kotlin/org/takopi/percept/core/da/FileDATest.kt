@@ -26,6 +26,10 @@ class FileDATest {
         assertTrue(da.has(cid))
         assertArrayEquals(data, da.getBytes(cid))
         assertEquals("raw", da.stat(cid).codec)
+        val digest = cid.removePrefix("cidv0-local-sha256:")
+        val manifestText = temporaryFolder.root.resolve("da/manifests/$digest.json").readText()
+        assertTrue(manifestText.contains(""""sizeBytes": 5"""))
+        assertTrue(manifestText.contains(""""sha256": "$digest""""))
         assertTrue(da.verify(cid).ok)
     }
 

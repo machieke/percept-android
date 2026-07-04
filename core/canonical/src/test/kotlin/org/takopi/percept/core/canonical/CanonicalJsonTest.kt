@@ -93,4 +93,12 @@ class CanonicalJsonTest {
         assertEquals("2026-07-04T12:00:41Z", time.iso)
         assertEquals(listOf("/2026", "/2026/07", "/2026/07/04", "/2026/07/04/12"), timePrefixKeys(time))
     }
+
+    @Test
+    fun parseUtcTimeTruncatesFractionalSecondsForEnvelopePurity() {
+        val time = parseUtcTime("2026-07-04T12:00:41.987654321Z")
+
+        assertEquals("2026-07-04T12:00:41Z", time.iso)
+        assertEquals(41, time.second)
+    }
 }

@@ -11,18 +11,18 @@ data class PixelBox(
         require(y2 >= y1) { "y2 must be >= y1" }
     }
 
-    val area: Int
-        get() = (x2 - x1) * (y2 - y1)
+    val area: Long
+        get() = (x2 - x1).toLong() * (y2 - y1).toLong()
 
     fun iouPerMille(other: PixelBox): Int {
         val ix1 = maxOf(x1, other.x1)
         val iy1 = maxOf(y1, other.y1)
         val ix2 = minOf(x2, other.x2)
         val iy2 = minOf(y2, other.y2)
-        val intersection = maxOf(0, ix2 - ix1) * maxOf(0, iy2 - iy1)
+        val intersection = maxOf(0, ix2 - ix1).toLong() * maxOf(0, iy2 - iy1).toLong()
         val union = area + other.area - intersection
         if (union <= 0) return 0
-        return ((intersection.toLong() * 1000L) / union).toInt()
+        return ((intersection * 1000L) / union).toInt()
     }
 }
 

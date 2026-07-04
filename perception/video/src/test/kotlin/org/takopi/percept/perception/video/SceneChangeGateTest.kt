@@ -22,6 +22,15 @@ class SceneChangeGateTest {
     }
 
     @Test
+    fun movingSameDetectionDoesNotTriggerDetectionSetChange() {
+        val gate = SceneChangeGate(luminanceThresholdPerMille = 900)
+
+        gate.process(sceneFrame(0, intArrayOf(10, 0), listOf(detection(x1 = 100))))
+
+        assertNull(gate.process(sceneFrame(1, intArrayOf(10, 0), listOf(detection(x1 = 160)))))
+    }
+
+    @Test
     fun l1DistanceIsIntegerPerMille() {
         assertEquals(
             1000,
@@ -43,11 +52,11 @@ class SceneChangeGateTest {
             detections = detections,
         )
 
-    private fun detection(): VideoDetection =
+    private fun detection(x1: Int = 100): VideoDetection =
         VideoDetection(
             label = "person",
             labelSpace = "coco-80",
             scorePerMille = 800,
-            box = PixelBox(100, 80, 220, 420),
+            box = PixelBox(x1, 80, x1 + 120, 420),
         )
 }

@@ -52,7 +52,7 @@ class SceneChangeGate(
     fun process(frame: SceneGateFrame): SceneChange? {
         val previousHistogram = lastHistogram
         val previousSignature = lastDetectionSignature
-        val signature = frame.detections.mapTo(sortedSetOf()) { detectionSignature(it) }
+        val signature = detectionSetSignature(frame.detections)
 
         lastHistogram = frame.histogram
         lastDetectionSignature = signature
@@ -81,17 +81,11 @@ class SceneChangeGate(
             reason = reason,
         )
 
-    private fun detectionSignature(detection: VideoDetection): String {
-        val box = detection.box
-        return listOf(
-            detection.labelSpace,
-            detection.label,
-            box.x1 / 32,
-            box.y1 / 32,
-            box.x2 / 32,
-            box.y2 / 32,
-        ).joinToString(":")
-    }
+    private fun detectionSetSignature(detections: List<VideoDetection>): Set<String> =
+        detections
+            .groupingBy { "${it.labelSpace}:${it.label}" }
+            .eachCount()
+            .mapTo(sortedSetOf()) { (labelKey, count) -> "$labelKey:$count" }
 }
 
 fun l1DistancePerMille(a: LuminanceHistogram, b: LuminanceHistogram): Int {

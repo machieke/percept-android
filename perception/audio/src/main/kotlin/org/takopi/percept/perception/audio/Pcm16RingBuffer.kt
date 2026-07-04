@@ -8,21 +8,22 @@ class Pcm16RingBuffer(
     }
 
     private val buffer = ShortArray(capacitySamples)
+    private val lock = Any()
     private var totalWritten: Long = 0
 
     val writeIndex: Long
-        get() = totalWritten
+        get() = synchronized(lock) { totalWritten }
 
-    fun append(samples: ShortArray): Long {
+    fun append(samples: ShortArray): Long = synchronized(lock) {
         val startIndex = totalWritten
         for (sample in samples) {
             buffer[(totalWritten % capacitySamples).toInt()] = sample
             totalWritten += 1
         }
-        return startIndex
+        startIndex
     }
 
-    fun readFrom(startIndex: Long, maxSamples: Int): PcmReadResult {
+    fun readFrom(startIndex: Long, maxSamples: Int): PcmReadResult = synchronized(lock) {
         require(startIndex >= 0) { "startIndex must be non-negative" }
         require(maxSamples >= 0) { "maxSamples must be non-negative" }
 
@@ -34,7 +35,7 @@ class Pcm16RingBuffer(
         for (offset in 0 until count) {
             out[offset] = buffer[((actualStart + offset) % capacitySamples).toInt()]
         }
-        return PcmReadResult(
+        PcmReadResult(
             samples = out,
             nextIndex = actualStart + count,
             overflowed = startIndex < earliestAvailable,

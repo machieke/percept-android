@@ -112,7 +112,7 @@ fun digestFromCid(cid: String): String {
 
 fun parseUtcTime(iso: String): TimeParts {
     val normalized = if (iso.endsWith("Z")) iso.dropLast(1) + "+00:00" else iso
-    val utc = OffsetDateTime.parse(normalized).withOffsetSameInstant(ZoneOffset.UTC)
+    val utc = OffsetDateTime.parse(normalized).withOffsetSameInstant(ZoneOffset.UTC).withNano(0)
     return TimeParts(
         iso = utc.renderUtcIso(),
         year = utc.year,
@@ -220,7 +220,7 @@ private fun isUnreserved(byte: Int): Boolean =
 private fun uppercaseHex(value: Int): Char = "0123456789ABCDEF"[value]
 
 private fun OffsetDateTime.renderUtcIso(): String {
-    val wholeSeconds = "%04d-%02d-%02dT%02d:%02d:%02d".format(
+    return "%04d-%02d-%02dT%02d:%02d:%02dZ".format(
         Locale.US,
         year,
         monthValue,
@@ -229,7 +229,4 @@ private fun OffsetDateTime.renderUtcIso(): String {
         minute,
         second,
     )
-    if (nano == 0) return "${wholeSeconds}Z"
-    val fractional = nano.toString().padStart(9, '0').trimEnd('0')
-    return "$wholeSeconds.${fractional}Z"
 }

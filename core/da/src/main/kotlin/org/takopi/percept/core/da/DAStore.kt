@@ -6,7 +6,6 @@ import org.takopi.percept.core.canonical.cidForBytes
 import org.takopi.percept.core.canonical.digestFromCid
 import org.takopi.percept.core.canonical.sha256Hex
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
@@ -173,7 +172,9 @@ private fun renderManifest(manifest: DaManifest): String = """
   "cid": "${manifest.cid}",
   "codec": "${manifest.codec}",
   "digest": "${manifest.digest}",
-  "size": ${manifest.size}
+  "sha256": "${manifest.digest.removePrefix("sha256:")}",
+  "size": ${manifest.size},
+  "sizeBytes": ${manifest.size}
 }
 """.trimIndent()
 

@@ -35,7 +35,7 @@ class AudioTagRunLengthEncoder(
 
     fun process(frame: AudioTagFrame): AudioTagSegment? {
         val active = frame.scorePerMille >= thresholdPerMille &&
-            !(suppressSpeechWhenAsrActive && frame.asrActive && frame.label == "Speech")
+            !(suppressSpeechWhenAsrActive && frame.asrActive && frame.isSpeechLabel())
         if (!active) {
             return closeOpen()
         }
@@ -98,3 +98,6 @@ class AudioTagRunLengthEncoder(
         }
     }
 }
+
+private fun AudioTagFrame.isSpeechLabel(): Boolean =
+    label.trim().equals("Speech", ignoreCase = true)

@@ -33,7 +33,7 @@ interface EventPointerDao {
         SELECT e.* FROM event_pointers e
         INNER JOIN time_prefix_keys k ON e.eventId = k.eventId
         WHERE k.prefixKey = :prefixKey
-        ORDER BY e.timeYear, e.timeMonth, e.timeDay, e.timeHour, e.eventId
+        ORDER BY e.timeYear, e.timeMonth, e.timeDay, e.timeHour, e.rowid
         """,
     )
     fun eventsByTimePrefix(prefixKey: String): List<EventPointerRow>
@@ -43,7 +43,7 @@ interface EventPointerDao {
         SELECT e.* FROM event_pointers e
         INNER JOIN actor_prefix_keys k ON e.eventId = k.eventId
         WHERE k.prefixKey = :prefixKey
-        ORDER BY e.eventId
+        ORDER BY e.rowid
         """,
     )
     fun eventsByActorPrefix(prefixKey: String): List<EventPointerRow>
@@ -53,7 +53,7 @@ interface EventPointerDao {
         SELECT e.* FROM event_pointers e
         INNER JOIN channel_prefix_keys k ON e.eventId = k.eventId
         WHERE k.prefixKey = :prefixKey
-        ORDER BY e.eventId
+        ORDER BY e.rowid
         """,
     )
     fun eventsByChannelPrefix(prefixKey: String): List<EventPointerRow>
@@ -63,7 +63,7 @@ interface EventPointerDao {
         SELECT e.* FROM event_pointers e
         INNER JOIN parent_event_ids p ON e.eventId = p.eventId
         WHERE p.parentEventId = :parentEventId
-        ORDER BY e.eventId
+        ORDER BY e.rowid
         """,
     )
     fun childrenOf(parentEventId: String): List<EventPointerRow>

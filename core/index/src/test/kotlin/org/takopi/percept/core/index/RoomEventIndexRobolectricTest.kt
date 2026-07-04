@@ -11,6 +11,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.takopi.percept.core.canonical.CBool
 import org.takopi.percept.core.canonical.CLong
 import org.takopi.percept.core.canonical.CString
 import org.takopi.percept.core.canonical.cList
@@ -103,8 +104,13 @@ class RoomEventIndexRobolectricTest {
         }
 
         assertEquals(1000, index.eventsByTimePrefix("/2026/07/04/12").size)
-        assertEquals(999, index.eventsByChannelPrefix("/perception/m3-robolectric-session/video").size)
-        assertEquals(999, index.childrenOf(root.eventId).size)
+        val videoRows = index.eventsByChannelPrefix("/perception/m3-robolectric-session/video")
+        assertEquals(999, videoRows.size)
+        assertEquals(emitted[1].eventId, videoRows.first().eventId)
+        assertEquals(emitted[999].eventId, videoRows.last().eventId)
+        val children = index.childrenOf(root.eventId)
+        assertEquals(999, children.size)
+        assertEquals(emitted[1].eventId, children.first().eventId)
         assertEquals(999, index.updateDispatchState(emitted.drop(1).map { it.eventId }, DispatchState.BUNDLED))
 
         listOf(0, 127, 511, 999).forEach { sampleIndex ->
@@ -112,6 +118,33 @@ class RoomEventIndexRobolectricTest {
             assertTrue(da.verify(event.payloadCid).ok)
             assertTrue(da.verify(event.eventCid).ok)
         }
+    }
+
+    @Test
+    fun storesLosslessCanonicalPathArraysForSegmentsContainingSlashes() {
+        val da = FileDA(daDir.toPath())
+        val index = RoomEventIndex(database)
+        val event = EventIngestor(da, index).ingestEvent(
+            rawPayload = cMap(
+                "kind" to CString("raw-payload"),
+                "schema" to CString("perception-session-v0.1"),
+                "device" to CString("moto-g84-5g"),
+                "sessionId" to CString("slash-session"),
+                "monotonicAnchorNanos" to CLong(123456789000),
+                "observedAt" to CString(observedAt(0)),
+            ),
+            observedAt = observedAt(0),
+            actorPath = listOf("device", "a/b"),
+            channelPath = listOf("perception", "slash/session"),
+            valueKind = "session-start",
+            provenance = androidProvenance(),
+        )
+
+        val rows = index.eventsByActorPrefix("/device/a%2Fb")
+        assertEquals(event.eventId, rows.single().eventId)
+        assertEquals("""["device","a/b"]""", rows.single().actorPath)
+        assertEquals("""["perception","slash/session"]""", rows.single().channelPath)
+        assertEquals(CBool(true), event.ack.entries["ok"])
     }
 
     private fun observedAt(secondOffset: Int): String {

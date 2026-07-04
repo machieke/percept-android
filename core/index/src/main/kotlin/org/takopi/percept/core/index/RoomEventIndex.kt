@@ -7,6 +7,7 @@ import org.takopi.percept.core.canonical.CMap
 import org.takopi.percept.core.canonical.CString
 import org.takopi.percept.core.canonical.cMap
 import org.takopi.percept.core.canonical.canonicalBytes
+import org.takopi.percept.core.canonical.stringList
 import org.takopi.percept.core.trace.EventIndex
 import java.nio.charset.StandardCharsets
 
@@ -48,8 +49,8 @@ class RoomEventIndex(
             timeMonth = timePath[1].toInt(),
             timeDay = timePath[2].toInt(),
             timeHour = timePath[3].toInt(),
-            actorPath = eventPointer.stringList("actorPath").joinToString("/"),
-            channelPath = eventPointer.stringList("channelPath").joinToString("/"),
+            actorPath = canonicalStringList(eventPointer.stringList("actorPath")),
+            channelPath = canonicalStringList(eventPointer.stringList("channelPath")),
             valueKind = eventPointer.requiredString("valueKind"),
             rootEventId = rootEventId,
             inputEventIds = eventPointer.stringList("inputEventIds").joinToString("\n"),
@@ -129,4 +130,7 @@ class RoomEventIndex(
             it.value
         }
     }
+
+    private fun canonicalStringList(values: List<String>): String =
+        canonicalBytes(stringList(values)).toString(StandardCharsets.UTF_8)
 }

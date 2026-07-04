@@ -94,10 +94,12 @@ class IouTrackAggregator(
         var frameCount: Int,
         var boxFirst: PixelBox,
         var boxLast: PixelBox,
+        var lastScorePerMille: Int,
         var missedFrames: Int,
     ) {
         fun update(detection: VideoDetection, tNanos: Long) {
             scorePerMille = maxOf(scorePerMille, detection.scorePerMille)
+            lastScorePerMille = detection.scorePerMille
             tEndNanos = tNanos
             frameCount += 1
             boxLast = detection.box
@@ -110,7 +112,7 @@ class IouTrackAggregator(
             tStartNanos = tEndNanos
             frameCount = 1
             boxFirst = boxLast
-            scorePerMille = segment.scorePerMille
+            scorePerMille = lastScorePerMille
             return segment
         }
 
@@ -139,6 +141,7 @@ class IouTrackAggregator(
                     frameCount = 1,
                     boxFirst = detection.box,
                     boxLast = detection.box,
+                    lastScorePerMille = detection.scorePerMille,
                     missedFrames = 0,
                 )
         }

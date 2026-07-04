@@ -27,15 +27,17 @@ class IouTrackAggregatorTest {
     fun emitsHeartbeatForLongLivedTrackAndKeepsSameTrackId() {
         val tracker = IouTrackAggregator(missedFrameLimit = 3, heartbeatNanos = 2_000_000_000L)
 
-        assertTrue(tracker.process(frame(0, detection(x1 = 100))).isEmpty())
-        assertTrue(tracker.process(frame(1, detection(x1 = 102))).isEmpty())
-        val heartbeat = tracker.process(frame(2, detection(x1 = 104)))
+        assertTrue(tracker.process(frame(0, detection(x1 = 100, scorePerMille = 950))).isEmpty())
+        assertTrue(tracker.process(frame(1, detection(x1 = 102, scorePerMille = 600))).isEmpty())
+        val heartbeat = tracker.process(frame(2, detection(x1 = 104, scorePerMille = 500)))
         val flushed = tracker.flush()
 
         assertEquals(1, heartbeat.size)
         assertEquals(TrackCloseReason.HEARTBEAT, heartbeat.single().closeReason)
+        assertEquals(950, heartbeat.single().scorePerMille)
         assertEquals(1, heartbeat.single().trackId)
         assertEquals(1, flushed.single().trackId)
+        assertEquals(500, flushed.single().scorePerMille)
         assertEquals(TrackCloseReason.FLUSH, flushed.single().closeReason)
     }
 
@@ -46,11 +48,11 @@ class IouTrackAggregatorTest {
             detections = detections.toList(),
         )
 
-    private fun detection(x1: Int): VideoDetection =
+    private fun detection(x1: Int, scorePerMille: Int = 800): VideoDetection =
         VideoDetection(
             label = "person",
             labelSpace = "coco-80",
-            scorePerMille = 800,
+            scorePerMille = scorePerMille,
             box = PixelBox(x1, 80, x1 + 120, 420),
         )
 }
