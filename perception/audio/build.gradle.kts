@@ -24,4 +24,5 @@ kotlin {
 
 dependencies {
     implementation(project(":core:trace"))
+    testImplementation(libs.junit)
 }
