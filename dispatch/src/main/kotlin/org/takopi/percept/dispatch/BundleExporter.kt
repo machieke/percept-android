@@ -39,6 +39,7 @@ data class BundleExportResult(
     val bundleId: String,
     val bundleDir: Path,
     val zipPath: Path,
+    val eventIds: List<String>,
     val pointerCount: Int,
     val objectCount: Int,
     val manifestCount: Int,
@@ -54,12 +55,46 @@ class BundleExporter(
         sourceDaRoot: Path,
         outputRoot: Path,
         maxEvents: Int = Int.MAX_VALUE,
+    ): BundleExportResult =
+        exportSessionRows(
+            sessionId = sessionId,
+            sequence = sequence,
+            sourceDaRoot = sourceDaRoot,
+            outputRoot = outputRoot,
+            maxEvents = maxEvents,
+            states = setOf(DispatchState.PENDING),
+        )
+
+    fun exportRetryable(
+        sessionId: String,
+        sequence: Int,
+        sourceDaRoot: Path,
+        outputRoot: Path,
+        maxEvents: Int = Int.MAX_VALUE,
+    ): BundleExportResult =
+        exportSessionRows(
+            sessionId = sessionId,
+            sequence = sequence,
+            sourceDaRoot = sourceDaRoot,
+            outputRoot = outputRoot,
+            maxEvents = maxEvents,
+            states = setOf(DispatchState.PENDING, DispatchState.BUNDLED),
+        )
+
+    private fun exportSessionRows(
+        sessionId: String,
+        sequence: Int,
+        sourceDaRoot: Path,
+        outputRoot: Path,
+        maxEvents: Int,
+        states: Set<DispatchState>,
     ): BundleExportResult {
         require(maxEvents > 0) { "maxEvents must be positive" }
-        val eventIndex = requireNotNull(index) { "RoomEventIndex is required for exportPending" }
+        val eventIndex = requireNotNull(index) { "RoomEventIndex is required for session export" }
         val sessionPrefixKey = prefixKeys(listOf("perception", sessionId)).last()
+        val stateNames = states.map { it.name }.toSet()
         val rows = eventIndex.eventsByChannelPrefix(sessionPrefixKey)
-            .filter { it.dispatchState == DispatchState.PENDING.name }
+            .filter { it.dispatchState in stateNames }
             .take(maxEvents)
         return export(
             BundleExportRequest(
@@ -114,6 +149,7 @@ class BundleExporter(
             bundleId = bundleId,
             bundleDir = bundleDir,
             zipPath = zipPath,
+            eventIds = request.rows.map { it.eventId },
             pointerCount = request.rows.size,
             objectCount = copiedDigests.size,
             manifestCount = copiedManifestDigests.size,
