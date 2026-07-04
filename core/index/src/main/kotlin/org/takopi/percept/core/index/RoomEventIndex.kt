@@ -104,6 +104,12 @@ class RoomEventIndex(
     fun childrenOf(parentEventId: String): List<EventPointerRow> =
         dao.childrenOf(parentEventId)
 
+    fun eventsByDispatchState(dispatchState: DispatchState): List<EventPointerRow> =
+        dao.eventsByDispatchState(dispatchState.name)
+
+    fun allEvents(): List<EventPointerRow> =
+        dao.allEvents()
+
     fun updateDispatchState(eventIds: List<String>, dispatchState: DispatchState): Int =
         dao.updateDispatchState(eventIds, dispatchState.name)
 

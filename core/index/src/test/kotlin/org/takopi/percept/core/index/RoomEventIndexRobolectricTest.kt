@@ -112,6 +112,9 @@ class RoomEventIndexRobolectricTest {
         assertEquals(999, children.size)
         assertEquals(emitted[1].eventId, children.first().eventId)
         assertEquals(999, index.updateDispatchState(emitted.drop(1).map { it.eventId }, DispatchState.BUNDLED))
+        assertEquals(1, index.eventsByDispatchState(DispatchState.PENDING).size)
+        assertEquals(999, index.eventsByDispatchState(DispatchState.BUNDLED).size)
+        assertEquals(1000, index.allEvents().size)
 
         listOf(0, 127, 511, 999).forEach { sampleIndex ->
             val event = emitted[sampleIndex]

@@ -68,6 +68,12 @@ interface EventPointerDao {
     )
     fun childrenOf(parentEventId: String): List<EventPointerRow>
 
+    @Query("SELECT * FROM event_pointers WHERE dispatchState = :dispatchState ORDER BY rowid")
+    fun eventsByDispatchState(dispatchState: String): List<EventPointerRow>
+
+    @Query("SELECT * FROM event_pointers ORDER BY rowid")
+    fun allEvents(): List<EventPointerRow>
+
     @Query("UPDATE event_pointers SET dispatchState = :dispatchState WHERE eventId IN (:eventIds)")
     fun updateDispatchState(eventIds: List<String>, dispatchState: String): Int
 }
