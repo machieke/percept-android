@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit
 class CameraMicrophoneRig(
     private val context: Context,
     private val lifecycleOwner: LifecycleOwner,
+    private val onError: ((String) -> Unit)? = null,
 ) : PerceptionRig {
     private val detector = MediaPipeFrameDetector.createWithFallback(context)
     private val tagger = TfLiteYamnetTagger.create(context)
@@ -63,6 +64,9 @@ class CameraMicrophoneRig(
             timeBase = timeBase,
             governor = governor,
             thermalLevelProvider = ::currentThermalLevel,
+            onAnalysisError = { e ->
+                onError?.invoke("video analysis failing: ${e.message}")
+            },
         )
         val executor = Executors.newSingleThreadExecutor()
         analysisExecutor = executor
@@ -106,8 +110,10 @@ class CameraMicrophoneRig(
         analysisExecutor?.shutdown()
         val video = checkNotNull(videoEngine) { "rig not started" }.finish()
         val audio = checkNotNull(audioPipeline) { "rig not started" }.stop()
-        detector.close()
-        tagger.close()
+        // A poisoned inference graph can throw from close(); the session's
+        // data is already safe, so never let teardown fail the stop.
+        runCatching(detector::close)
+        runCatching(tagger::close)
         val base = checkNotNull(timeBase)
         return PerceptionRunCounters(
             tEndNanos = base.elapsedNanos(SystemClock.elapsedRealtimeNanos()),

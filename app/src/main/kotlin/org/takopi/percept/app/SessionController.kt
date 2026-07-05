@@ -16,6 +16,7 @@ import org.takopi.percept.core.da.FileDA
 import org.takopi.percept.core.index.EventPointerDatabase
 import org.takopi.percept.core.index.RoomEventIndex
 import org.takopi.percept.core.trace.IngestedEvent
+import org.takopi.percept.core.trace.PerceptionRunCounters
 import org.takopi.percept.core.trace.PerceptionSession
 import org.takopi.percept.core.trace.PerceptionSessionConfig
 import org.takopi.percept.core.trace.SessionTimeBase
@@ -87,8 +88,14 @@ class SessionController(
 
     private var session: PerceptionSession? = null
     private var rig: PerceptionRig? = null
+    private var activeTimeBase: SessionTimeBase? = null
     private var starting = false
     private var bundleSequence = 0
+
+    /** Non-fatal problems reported by the rig (e.g. detector failures). */
+    fun reportRigError(message: String) {
+        stateFlow.update { it.copy(lastError = message) }
+    }
 
     /**
      * Fire-and-forget start for UI/service callers. Everything heavy — rig
@@ -153,6 +160,7 @@ class SessionController(
         synchronized(this) {
             session = newSession
             this.rig = rig
+            activeTimeBase = timeBase
             starting = false
         }
     }
@@ -177,8 +185,22 @@ class SessionController(
             rig = null
             pair
         }
+        val timeBase = synchronized(this) { activeTimeBase }
         if (activeSession == null || activeRig == null) return
-        val counters = activeRig.stop()
+        // The session-stop event must be written even when capture teardown
+        // fails; fall back to zeroed counters and surface the rig error.
+        val counters = try {
+            activeRig.stop()
+        } catch (t: Throwable) {
+            stateFlow.update { it.copy(lastError = "rig stop failed: ${t.message}") }
+            PerceptionRunCounters(
+                tEndNanos = timeBase?.let { it.elapsedNanos(monotonicNanos()) } ?: 0,
+                framesProcessed = 0,
+                droppedFrames = 0,
+                audioRingBufferOverruns = 0,
+                thermalThrottleEvents = 0,
+            )
+        }
         activeSession.stop(counters)
         stateFlow.update {
             it.copy(

@@ -1,6 +1,7 @@
 package org.takopi.percept.perception.video
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Rect
@@ -30,6 +31,10 @@ class MediaPipeFrameDetector private constructor(
         }.toByteArray()
         val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
             ?: return emptyList()
+        return detectBitmap(bitmap)
+    }
+
+    private fun detectBitmap(bitmap: Bitmap): List<VideoDetection> {
         val result = detector.detect(BitmapImageBuilder(bitmap).build())
         return result.detections().mapNotNull { detection ->
             val category = detection.categories().firstOrNull() ?: return@mapNotNull null
@@ -48,6 +53,16 @@ class MediaPipeFrameDetector private constructor(
         }
     }
 
+    /**
+     * Runs one dummy inference. Delegate problems can pass construction and
+     * only fail at Process() time (e.g. the GPU delegate cannot execute this
+     * int8 model: "ToTensorConverter: input data size does not match"), so
+     * fallback decisions must be based on an actual run.
+     */
+    fun probe() {
+        detectBitmap(Bitmap.createBitmap(PROBE_SIZE, PROBE_SIZE, Bitmap.Config.ARGB_8888))
+    }
+
     override fun close() {
         detector.close()
     }
@@ -56,6 +71,7 @@ class MediaPipeFrameDetector private constructor(
         const val LABEL_SPACE: String = "coco-80"
         const val MODEL_ASSET_PATH: String = "models/efficientdet_lite0_int8.tflite"
         private const val DETECT_JPEG_QUALITY: Int = 90
+        private const val PROBE_SIZE: Int = 64
 
         fun create(
             context: Context,
@@ -80,11 +96,30 @@ class MediaPipeFrameDetector private constructor(
             )
         }
 
-        /** Risk 2: GPU delegate first, XNNPACK/CPU fallback if the driver refuses. */
-        fun createWithFallback(context: Context): MediaPipeFrameDetector = try {
-            create(context, useGpu = true)
-        } catch (_: RuntimeException) {
-            create(context, useGpu = false)
+        /**
+         * Risk 2: GPU delegate first, CPU/XNNPACK fallback — verified by a
+         * probe inference, since delegate incompatibilities with the int8
+         * model surface at run time rather than at construction.
+         */
+        fun createWithFallback(context: Context): MediaPipeFrameDetector {
+            val gpu = try {
+                create(context, useGpu = true)
+            } catch (_: RuntimeException) {
+                null
+            }
+            if (gpu != null) {
+                try {
+                    gpu.probe()
+                    return gpu
+                } catch (_: RuntimeException) {
+                    try {
+                        gpu.close()
+                    } catch (_: RuntimeException) {
+                        // A poisoned graph may refuse to close; fall through.
+                    }
+                }
+            }
+            return create(context, useGpu = false).also(MediaPipeFrameDetector::probe)
         }
     }
 }

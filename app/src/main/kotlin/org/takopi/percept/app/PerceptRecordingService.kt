@@ -37,7 +37,9 @@ class PerceptRecordingService : LifecycleService() {
         // Factory runs on the controller's background scope: rig construction
         // loads models and stages the whisper weights, which must not touch
         // the main thread.
-        controller.startSession { CameraMicrophoneRig(applicationContext, this) }
+        controller.startSession {
+            CameraMicrophoneRig(applicationContext, this, controller::reportRigError)
+        }
     }
 
     private fun stopRecording() {

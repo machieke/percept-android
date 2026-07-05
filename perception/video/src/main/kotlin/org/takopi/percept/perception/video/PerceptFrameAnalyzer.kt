@@ -23,20 +23,29 @@ class PerceptFrameAnalyzer(
     private val thermalLevelProvider: () -> ThermalLevel = { ThermalLevel.NOMINAL },
     private val jpegQuality: Int = KEYFRAME_JPEG_QUALITY,
     private val onFrameAnalyzed: ((List<VideoDetection>) -> Unit)? = null,
+    private val onAnalysisError: ((Exception) -> Unit)? = null,
 ) : ImageAnalysis.Analyzer {
     private val fallbackTimestamps = AtomicLong(0)
+    private val analysisFailures = AtomicLong(0)
 
     /** Frames whose HAL timestamp was not in the elapsedRealtime domain (risk 3). */
     val clockBaseFallbacks: Long
         get() = fallbackTimestamps.get()
+
+    /** Frames lost to analysis exceptions; the first one fires [onAnalysisError]. */
+    val analysisFailureCount: Long
+        get() = analysisFailures.get()
 
     override fun analyze(image: ImageProxy) {
         // CameraX propagates analyzer exceptions into a process crash; a bad
         // frame or detector hiccup must only cost us that frame.
         try {
             analyzeOrThrow(image)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             engine.onFrameDropped()
+            if (analysisFailures.incrementAndGet() == 1L) {
+                onAnalysisError?.invoke(e)
+            }
         }
     }
 

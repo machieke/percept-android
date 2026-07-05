@@ -150,4 +150,28 @@ class SessionControllerTest {
         assertFalse(controller.state.value.running)
         assertEquals(0, controller.state.value.eventsIngested)
     }
+
+    @Test
+    fun rigStopFailureStillIngestsSessionStop() = runBlocking {
+        val rig = object : PerceptionRig {
+            override val detectorRunId = "fake-detector-v0@robolectric"
+            override val sceneGateRunId = "fake-scene-gate-v0@robolectric"
+            override val audioTaggerRunId = "fake-yamnet-v0@robolectric"
+            override val asrRunId = "fake-asr-v0@robolectric"
+
+            override fun start(sink: TraceSink, timeBase: SessionTimeBase) {}
+
+            override fun stop(): PerceptionRunCounters =
+                throw IllegalStateException("poisoned inference graph")
+        }
+        controller.startSessionAndWait(rig)
+        controller.stopSessionAndWait()
+
+        val state = controller.state.value
+        assertFalse(state.running)
+        assertTrue(state.lastError!!.contains("poisoned inference graph"))
+        // session-start + session-stop both landed despite the rig failure.
+        assertEquals(2, state.eventsIngested)
+        assertEquals("session-stop", state.recentEvents.first().valueKind)
+    }
 }
