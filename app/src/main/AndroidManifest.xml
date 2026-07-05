@@ -14,10 +14,12 @@
         android:name="android.hardware.microphone"
         android:required="false" />
 
+    <!-- Cleartext allowed for user-configured LAN endpoints (ASR, bundle upload). -->
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true">

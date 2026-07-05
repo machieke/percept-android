@@ -15,6 +15,8 @@ import org.takopi.percept.core.trace.TraceSink
 import org.takopi.percept.perception.audio.AudioCapturePipeline
 import org.takopi.percept.perception.audio.AudioPerceptionEngine
 import org.takopi.percept.perception.audio.CancellableAsrEngine
+import org.takopi.percept.perception.audio.FallbackAsrEngine
+import org.takopi.percept.perception.audio.RemoteAsrEngine
 import org.takopi.percept.perception.audio.SherpaZipformerAsrEngine
 import org.takopi.percept.perception.audio.TfLiteYamnetTagger
 import org.takopi.percept.perception.audio.NativeWhisper
@@ -157,8 +159,27 @@ class CameraMicrophoneRig(
             else -> ThermalLevel.NOMINAL
         }
 
-    /** Zipformer (sherpa-onnx) is primary; whisper stays as the fallback. */
-    private fun createAsrEngine(): Pair<org.takopi.percept.perception.audio.AsrEngine, String> =
+    /**
+     * Remote Parakeet (server/asr) when an endpoint is configured, wrapped so
+     * connectivity loss falls back per-window to the on-device engine;
+     * otherwise on-device Zipformer with whisper as last resort.
+     */
+    private fun createAsrEngine(): Pair<org.takopi.percept.perception.audio.AsrEngine, String> {
+        val local = createLocalAsrEngine()
+        val remoteUrl = PerceptSettings(context).asrEndpointUrl
+        if (remoteUrl.isBlank()) return local
+        val remote = RemoteAsrEngine(remoteUrl)
+        val engine = FallbackAsrEngine(
+            primary = remote,
+            fallback = local.first,
+            onPrimaryFailure = { t ->
+                onError?.invoke("remote ASR failed (${t.message}); window used ${local.second}")
+            },
+        )
+        return engine to "$REMOTE_ASR_RUN_ID+fallback-${local.second}"
+    }
+
+    private fun createLocalAsrEngine(): Pair<org.takopi.percept.perception.audio.AsrEngine, String> =
         try {
             val sherpa = SherpaZipformerAsrEngine.create(context)
             sherpa to sherpa.extractionRunId
@@ -182,5 +203,6 @@ class CameraMicrophoneRig(
 
     companion object {
         const val SCENE_GATE_RUN_ID: String = "scene-gate-detset-luma-v1"
+        const val REMOTE_ASR_RUN_ID: String = "parakeet-tdt-0.6b-v3-int8@sherpa-onnx-1.13.3"
     }
 }

@@ -38,6 +38,15 @@ object ExtractionRuns {
         sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
     )
 
+    // Remote ASR (server/asr compose service); assetPath refers to the
+    // server's model volume, not device assets.
+    val PARAKEET_V3_REMOTE = ModelEntry(
+        runId = "parakeet-tdt-0.6b-v3-int8@sherpa-onnx-1.13.3",
+        assetPath = "server:/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+        sha256 = "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf",
+        sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+    )
+
     val WHISPER_TINY_Q8 = ModelEntry(
         runId = "whisper-tiny-q8_0@whispercpp-cpu4",
         assetPath = "models/ggml-tiny-q8_0.bin",
@@ -49,6 +58,7 @@ object ExtractionRuns {
         EFFICIENTDET_LITE0_INT8,
         YAMNET,
         ZIPFORMER_EN_20M,
+        PARAKEET_V3_REMOTE,
         WHISPER_TINY_Q8,
     ).associateBy(ModelEntry::runId)
 }

@@ -105,6 +105,7 @@ private fun SessionScreen(
     val context = LocalContext.current
     var endpoint by remember { mutableStateOf(settings.endpointUrl) }
     var token by remember { mutableStateOf(settings.bearerToken) }
+    var asrEndpoint by remember { mutableStateOf(settings.asrEndpointUrl) }
 
     Column(
         modifier = Modifier
@@ -178,6 +179,16 @@ private fun SessionScreen(
                 settings.bearerToken = value
             },
             label = { Text("Bearer token") },
+            singleLine = true,
+        )
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = asrEndpoint,
+            onValueChange = { value ->
+                asrEndpoint = value
+                settings.asrEndpointUrl = value
+            },
+            label = { Text("Remote ASR URL (blank = on-device)") },
             singleLine = true,
         )
 

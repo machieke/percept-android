@@ -1,0 +1,14 @@
+services:
+  percept-asr:
+    build: .
+    container_name: percept-asr
+    ports:
+      - "8123:8000"
+    volumes:
+      - percept-asr-models:/models
+    environment:
+      - ASR_THREADS=4
+    restart: unless-stopped
+
+volumes:
+  percept-asr-models:
