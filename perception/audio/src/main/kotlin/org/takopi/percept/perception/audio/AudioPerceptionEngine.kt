@@ -232,11 +232,12 @@ class AudioPerceptionEngine(
         const val DEFAULT_SAMPLE_RATE: Int = 16_000
 
         /**
-         * Mean-abs per-mille of full scale. The first device session showed a
-         * Speech tag but zero transcribed windows at 20; quiet phone-mic
-         * speech sits low, so keep the energy gate permissive.
+         * Mean-abs per-mille of full scale. Device sessions showed YAMNet
+         * hearing Speech while every ASR window failed this gate at 20 and
+         * then at 5 — raw phone-mic levels are very low — so the gate is a
+         * near-floor sanity check and VOICE_RECOGNITION AGC does the rest.
          */
-        const val DEFAULT_VAD_THRESHOLD_PER_MILLE: Int = 5
+        const val DEFAULT_VAD_THRESHOLD_PER_MILLE: Int = 2
 
         /** 0.975 s YAMNet frame at 16 kHz. */
         const val DEFAULT_TAG_FRAME_SAMPLES: Int = 15_600

@@ -32,8 +32,10 @@ class AudioCapturePipeline(
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
+        // VOICE_RECOGNITION applies AGC tuned for speech: raw MIC levels on
+        // the Moto G84 sat below even a 5 per-mille energy gate.
         val audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
