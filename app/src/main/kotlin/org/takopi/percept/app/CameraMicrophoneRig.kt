@@ -13,6 +13,8 @@ import org.takopi.percept.core.trace.PerceptionRunCounters
 import org.takopi.percept.core.trace.SessionTimeBase
 import org.takopi.percept.core.trace.TraceSink
 import org.takopi.percept.perception.audio.AudioCapturePipeline
+import org.takopi.percept.perception.audio.AudioChunkEncoders
+import org.takopi.percept.perception.audio.AudioChunkRecorder
 import org.takopi.percept.perception.audio.AudioPerceptionEngine
 import org.takopi.percept.perception.audio.CancellableAsrEngine
 import org.takopi.percept.perception.audio.FallbackAsrEngine
@@ -93,13 +95,24 @@ class CameraMicrophoneRig(
             )
         }, ContextCompat.getMainExecutor(context))
 
+        val audioStartTNanos = timeBase.elapsedNanos(SystemClock.elapsedRealtimeNanos())
         val audioEngine = AudioPerceptionEngine(
             sink = sink,
             asr = asrPair.first,
             tagger = tagger,
-            startTNanos = timeBase.elapsedNanos(SystemClock.elapsedRealtimeNanos()),
+            startTNanos = audioStartTNanos,
         )
-        audioPipeline = AudioCapturePipeline(audioEngine).also(AudioCapturePipeline::start)
+        // Full-session compressed audio → DA artifacts: bundles carry the
+        // complete episodic record for server-side processing.
+        val chunkRecorder = AudioChunkRecorder(
+            sink = sink,
+            encoder = AudioChunkEncoders.createBest(context),
+            startTNanos = audioStartTNanos,
+        )
+        audioPipeline = AudioCapturePipeline(
+            engine = audioEngine,
+            chunkRecorder = chunkRecorder,
+        ).also(AudioCapturePipeline::start)
     }
 
     override fun stop(): PerceptionRunCounters {

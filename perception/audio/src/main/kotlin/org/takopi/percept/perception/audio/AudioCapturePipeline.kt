@@ -17,6 +17,7 @@ class AudioCapturePipeline(
     private val sampleRate: Int = AudioPerceptionEngine.DEFAULT_SAMPLE_RATE,
     private val readChunkSamples: Int = DEFAULT_READ_CHUNK_SAMPLES,
     private val processIntervalMillis: Long = DEFAULT_PROCESS_INTERVAL_MILLIS,
+    private val chunkRecorder: AudioChunkRecorder? = null,
 ) {
     private val running = AtomicBoolean(false)
     private var record: AudioRecord? = null
@@ -52,7 +53,9 @@ class AudioCapturePipeline(
             while (running.get()) {
                 val read = audioRecord.read(chunk, 0, chunk.size)
                 if (read > 0) {
-                    engine.append(chunk.copyOf(read))
+                    val samples = chunk.copyOf(read)
+                    engine.append(samples)
+                    chunkRecorder?.append(samples)
                 }
             }
         }, "percept-audio-capture").also(Thread::start)
@@ -60,6 +63,7 @@ class AudioCapturePipeline(
         processThread = Thread({
             while (running.get()) {
                 engine.processAvailable()
+                chunkRecorder?.encodeReady()
                 try {
                     Thread.sleep(processIntervalMillis)
                 } catch (_: InterruptedException) {
@@ -79,7 +83,9 @@ class AudioCapturePipeline(
             audioRecord.release()
         }
         record = null
-        return engine.finish()
+        val counters = engine.finish()
+        chunkRecorder?.finish()
+        return counters
     }
 
     companion object {

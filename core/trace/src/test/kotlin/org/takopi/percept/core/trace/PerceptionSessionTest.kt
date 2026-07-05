@@ -99,12 +99,36 @@ class PerceptionSessionTest {
                 ),
             ),
         )
+        val chunkBytes = "fake-opus".toByteArray(StandardCharsets.UTF_8)
+        assertTrue(
+            session.trySubmit(
+                PerceptionEvent.AudioChunk(
+                    chunkIndex = 0,
+                    tStartNanos = 0,
+                    tEndNanos = 60_000_000_000L,
+                    sampleRate = 16_000,
+                    sampleCount = 960_000,
+                    contentType = "audio/ogg; codecs=opus",
+                    codecId = "oggopus-test",
+                    encoded = chunkBytes,
+                ),
+            ),
+        )
         advanceUntilIdle()
         val stop = session.stop(counters(tEndNanos = 60_000_000_000L))
 
-        assertEquals(6, ingested.size)
+        assertEquals(7, ingested.size)
         val (start, scene, track, tag, asr) = ingested
+        val chunk = ingested[5]
         assertEquals(root.eventId, start.eventId)
+
+        assertEquals("audio-chunk", chunk.pointer.requireString("valueKind"))
+        assertEquals(listOf(root.eventId), chunk.pointer.stringListOf("parentEventIds"))
+        val chunkCid = cidForBytes(chunkBytes)
+        assertEquals(listOf(chunkCid), chunk.pointer.stringListOf("outputArtifactIds"))
+        assertTrue(da.has(chunkCid))
+        assertEquals("raw", da.stat(chunkCid).codec)
+        assertEquals("2026-07-04T12:01:00Z", chunk.envelope.timeMap().requireString("iso"))
 
         assertEquals("session-start", start.pointer.requireString("valueKind"))
         assertNull(start.envelope.causalMap().stringOrNull("rootEventId"))
@@ -162,7 +186,7 @@ class PerceptionSessionTest {
         }
 
         assertEquals(
-            PerceptionSessionStats(eventsIngested = 6, eventsDropped = 0),
+            PerceptionSessionStats(eventsIngested = 7, eventsDropped = 0),
             session.stats(),
         )
     }

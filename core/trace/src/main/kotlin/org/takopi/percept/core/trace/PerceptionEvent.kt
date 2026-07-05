@@ -67,6 +67,33 @@ sealed interface PerceptionEvent {
             require(tEndNanos >= tStartNanos) { "tEndNanos must be >= tStartNanos" }
         }
     }
+
+    /**
+     * A compressed slice of the session's full audio, stored as a raw DA
+     * artifact (like keyframes) so bundles carry the complete episodic
+     * record for server-side processing.
+     */
+    class AudioChunk(
+        val chunkIndex: Int,
+        val tStartNanos: Long,
+        val tEndNanos: Long,
+        val sampleRate: Int,
+        val sampleCount: Long,
+        val contentType: String,
+        val codecId: String,
+        val encoded: ByteArray,
+    ) : PerceptionEvent {
+        init {
+            require(chunkIndex >= 0) { "chunkIndex must be non-negative" }
+            require(tStartNanos >= 0) { "tStartNanos must be non-negative" }
+            require(tEndNanos >= tStartNanos) { "tEndNanos must be >= tStartNanos" }
+            require(sampleRate > 0) { "sampleRate must be positive" }
+            require(sampleCount > 0) { "sampleCount must be positive" }
+            require(contentType.isNotBlank()) { "contentType must not be blank" }
+            require(codecId.isNotBlank()) { "codecId must not be blank" }
+            require(encoded.isNotEmpty()) { "encoded audio must not be empty" }
+        }
+    }
 }
 
 /** Single funnel every perception thread writes into (§3.2). */

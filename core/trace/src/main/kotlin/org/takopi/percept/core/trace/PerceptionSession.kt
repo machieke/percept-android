@@ -225,6 +225,34 @@ class PerceptionSession(
                 provenance = provenance(config.audioTaggerRunId),
             )
 
+            is PerceptionEvent.AudioChunk -> {
+                val audioCid = da.putBytes(event.encoded, codec = "raw")
+                ingestor.ingestEvent(
+                    rawPayload = cMap(
+                        "kind" to CString("raw-payload"),
+                        "schema" to CString("perception-audio-chunk-v0.1"),
+                        "sessionId" to CString(config.sessionId),
+                        "chunkIndex" to CLong(event.chunkIndex.toLong()),
+                        "tStartNanos" to CLong(event.tStartNanos),
+                        "tEndNanos" to CLong(event.tEndNanos),
+                        "sampleRate" to CLong(event.sampleRate.toLong()),
+                        "sampleCount" to CLong(event.sampleCount),
+                        "contentType" to CString(event.contentType),
+                        "codec" to CString(event.codecId),
+                        "sizeBytes" to CLong(event.encoded.size.toLong()),
+                        "observedAt" to CString(timeBase.observedAtIso(event.tEndNanos)),
+                    ),
+                    observedAt = timeBase.observedAtIso(event.tEndNanos),
+                    actorPath = microphoneActorPath(),
+                    channelPath = channelPath("audio"),
+                    valueKind = "audio-chunk",
+                    parentEventIds = listOf(root),
+                    rootEventId = root,
+                    outputArtifactIds = listOf(audioCid),
+                    provenance = provenance(null),
+                )
+            }
+
             is PerceptionEvent.AsrSegment -> ingestor.ingestEvent(
                 rawPayload = cMap(
                     "kind" to CString("raw-payload"),

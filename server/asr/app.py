@@ -37,21 +37,12 @@ def healthz() -> dict:
     return {"ok": True, "modelRunId": MODEL_RUN_ID}
 
 
-@app.post("/transcribe")
-async def transcribe(request: Request, sampleRate: int = 16000) -> dict:
-    body = await request.body()
-    if not body or len(body) % 2 != 0:
-        raise HTTPException(status_code=400, detail="body must be raw PCM16 LE mono")
-    if sampleRate < 8000 or sampleRate > 48000:
-        raise HTTPException(status_code=400, detail="unsupported sampleRate")
-
-    samples = np.frombuffer(body, dtype="<i2").astype(np.float32) / 32768.0
-    duration_ms = int(len(samples) * 1000 / sampleRate)
-
+def _decode(samples: "np.ndarray", sample_rate: int) -> dict:
+    duration_ms = int(len(samples) * 1000 / sample_rate)
     started = time.time()
     with decode_lock:
         stream = recognizer.create_stream()
-        stream.accept_waveform(sampleRate, samples)
+        stream.accept_waveform(sample_rate, samples)
         recognizer.decode_stream(stream)
         result = stream.result
     decode_ms = int((time.time() - started) * 1000)
@@ -66,3 +57,34 @@ async def transcribe(request: Request, sampleRate: int = 16000) -> dict:
         "decodeMs": decode_ms,
         "modelRunId": MODEL_RUN_ID,
     }
+
+
+@app.post("/transcribe")
+async def transcribe(request: Request, sampleRate: int = 16000) -> dict:
+    body = await request.body()
+    if not body or len(body) % 2 != 0:
+        raise HTTPException(status_code=400, detail="body must be raw PCM16 LE mono")
+    if sampleRate < 8000 or sampleRate > 48000:
+        raise HTTPException(status_code=400, detail="unsupported sampleRate")
+    samples = np.frombuffer(body, dtype="<i2").astype(np.float32) / 32768.0
+    return _decode(samples, sampleRate)
+
+
+@app.post("/transcribe-file")
+async def transcribe_file(request: Request) -> dict:
+    """Container audio (ogg/opus, flac, wav) — the format of the
+    audio-chunk artifacts that bundles carry for episodic memory."""
+    import io
+
+    import soundfile as sf
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty body")
+    try:
+        samples, sample_rate = sf.read(io.BytesIO(body), dtype="float32")
+    except Exception as exc:  # noqa: BLE001 - report decode problems as 400s
+        raise HTTPException(status_code=400, detail=f"cannot decode audio: {exc}")
+    if samples.ndim > 1:
+        samples = samples.mean(axis=1)
+    return _decode(samples, sample_rate)

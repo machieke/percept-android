@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir \
     sherpa-onnx==1.13.3 \
     fastapi==0.115.6 \
     "uvicorn[standard]==0.34.0" \
-    numpy==2.2.6
+    numpy==2.2.6 \
+    soundfile==0.14.0
 
 WORKDIR /app
 COPY app.py entrypoint.sh /app/
