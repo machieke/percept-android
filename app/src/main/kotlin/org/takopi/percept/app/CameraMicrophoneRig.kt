@@ -22,8 +22,10 @@ import org.takopi.percept.perception.video.PerceptFrameAnalyzer
 import org.takopi.percept.perception.video.ThermalLevel
 import org.takopi.percept.perception.video.VideoPerceptionEngine
 import java.io.File
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * The real capture rig: CameraX ImageAnalysis (KEEP_ONLY_LATEST, 640×480) and
@@ -91,7 +93,16 @@ class CameraMicrophoneRig(
     }
 
     override fun stop(): PerceptionRunCounters {
-        cameraProvider?.unbindAll()
+        // Called from a background coroutine; CameraX requires unbinding on
+        // the main thread.
+        cameraProvider?.let { provider ->
+            val unbound = CountDownLatch(1)
+            ContextCompat.getMainExecutor(context).execute {
+                provider.unbindAll()
+                unbound.countDown()
+            }
+            unbound.await(5, TimeUnit.SECONDS)
+        }
         analysisExecutor?.shutdown()
         val video = checkNotNull(videoEngine) { "rig not started" }.finish()
         val audio = checkNotNull(audioPipeline) { "rig not started" }.stop()

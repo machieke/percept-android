@@ -3,6 +3,7 @@ package org.takopi.percept.app
 import android.content.Context
 import android.os.SystemClock
 import androidx.room.Room
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -47,6 +48,7 @@ data class SessionUiState(
     val recentEvents: List<TickerEntry> = emptyList(),
     val lastExportPath: String? = null,
     val lastUploadStatus: String? = null,
+    val lastError: String? = null,
 )
 
 /**
@@ -57,7 +59,7 @@ data class SessionUiState(
 class SessionController(
     private val appContext: Context,
     private val settings: PerceptSettings = PerceptSettings(appContext),
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    externalScope: CoroutineScope? = null,
     private val databaseFactory: (Context) -> EventPointerDatabase = { context ->
         Room.databaseBuilder(context, EventPointerDatabase::class.java, "event-pointers.db")
             .build()
@@ -68,6 +70,14 @@ class SessionController(
     private val stateFlow = MutableStateFlow(SessionUiState())
     val state: StateFlow<SessionUiState> = stateFlow
 
+    // Uncaught failures (e.g. in the ingestion consumer) must surface in the
+    // UI, not take down the process.
+    private val scope: CoroutineScope = externalScope ?: CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, throwable ->
+            stateFlow.update { it.copy(lastError = "background failure: ${throwable.message}") }
+        },
+    )
+
     val daRoot: Path = appContext.filesDir.toPath().resolve("da")
 
     private val da by lazy { FileDA(daRoot) }
@@ -77,11 +87,33 @@ class SessionController(
 
     private var session: PerceptionSession? = null
     private var rig: PerceptionRig? = null
+    private var starting = false
     private var bundleSequence = 0
 
-    @Synchronized
-    fun startSession(rig: PerceptionRig) {
-        check(session == null) { "session already running" }
+    /**
+     * Fire-and-forget start for UI/service callers. Everything heavy — rig
+     * construction (model loading), DA writes, Room inserts — runs off the
+     * main thread; Room forbids main-thread access and model init takes
+     * seconds. Failures land in [SessionUiState.lastError], never a crash.
+     */
+    fun startSession(rigFactory: () -> PerceptionRig) {
+        scope.launch {
+            try {
+                startSessionAndWait(rigFactory())
+            } catch (t: Throwable) {
+                stateFlow.update {
+                    it.copy(running = false, sessionId = null, lastError = "start failed: ${t.message}")
+                }
+            }
+        }
+    }
+
+    fun startSessionAndWait(rig: PerceptionRig) {
+        synchronized(this) {
+            check(session == null && !starting) { "session already running" }
+            // Reserve the slot before the slow work so double-taps can't race.
+            starting = true
+        }
         val timeBase = SessionTimeBase(monotonicNanos(), wallClockMillis())
         val sessionId = newSessionId()
         val config = PerceptionSessionConfig(
@@ -99,24 +131,41 @@ class SessionController(
             timeBase = timeBase,
             onEventIngested = ::onEventIngested,
         )
-        stateFlow.update {
-            it.copy(
-                running = true,
-                sessionId = sessionId,
-                eventsIngested = 0,
-                eventsDropped = 0,
-                recentEvents = emptyList(),
-            )
+        try {
+            stateFlow.update {
+                it.copy(
+                    running = true,
+                    sessionId = sessionId,
+                    eventsIngested = 0,
+                    eventsDropped = 0,
+                    recentEvents = emptyList(),
+                    lastError = null,
+                )
+            }
+            newSession.start(scope)
+            rig.start(newSession, timeBase)
+        } catch (t: Throwable) {
+            synchronized(this) {
+                starting = false
+            }
+            throw t
         }
-        newSession.start(scope)
-        rig.start(newSession, timeBase)
-        session = newSession
-        this.rig = rig
+        synchronized(this) {
+            session = newSession
+            this.rig = rig
+            starting = false
+        }
     }
 
     fun stopSession(onStopped: (() -> Unit)? = null) {
         scope.launch {
-            stopSessionAndWait()
+            try {
+                stopSessionAndWait()
+            } catch (t: Throwable) {
+                stateFlow.update {
+                    it.copy(running = false, sessionId = null, lastError = "stop failed: ${t.message}")
+                }
+            }
             onStopped?.invoke()
         }
     }

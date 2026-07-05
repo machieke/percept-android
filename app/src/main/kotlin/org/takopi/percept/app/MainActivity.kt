@@ -145,6 +145,13 @@ private fun SessionScreen(
         state.lastUploadStatus?.let { status ->
             Text(text = "upload: $status", style = MaterialTheme.typography.bodySmall)
         }
+        state.lastError?.let { error ->
+            Text(
+                text = "error: $error",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
 
         OutlinedTextField(
             modifier = Modifier.fillMaxWidth(),

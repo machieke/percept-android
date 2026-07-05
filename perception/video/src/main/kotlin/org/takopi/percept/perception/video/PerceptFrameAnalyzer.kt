@@ -31,6 +31,16 @@ class PerceptFrameAnalyzer(
         get() = fallbackTimestamps.get()
 
     override fun analyze(image: ImageProxy) {
+        // CameraX propagates analyzer exceptions into a process crash; a bad
+        // frame or detector hiccup must only cost us that frame.
+        try {
+            analyzeOrThrow(image)
+        } catch (_: Exception) {
+            engine.onFrameDropped()
+        }
+    }
+
+    private fun analyzeOrThrow(image: ImageProxy) {
         image.use { proxy ->
             val resolution = FrameTimestamps.resolveFrameElapsedNanos(
                 imageTimestampNanos = proxy.imageInfo.timestamp,

@@ -70,7 +70,7 @@ class LiveEngineBundleHarnessTest {
     @Test
     fun engineProducedBundleExportsForReferenceVerification() = runBlocking {
         val rig = SyntheticEngineRig()
-        controller.startSession(rig)
+        controller.startSessionAndWait(rig)
         controller.stopSessionAndWait()
 
         // session-start + 2 scenes + 2 tracks + 1 audio tag + 1 asr + session-stop

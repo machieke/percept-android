@@ -80,7 +80,7 @@ class SessionControllerTest {
     @Test
     fun fullSessionRoundTripThroughRealStores() = runBlocking {
         val rig = FakeRig()
-        controller.startSession(rig)
+        controller.startSessionAndWait(rig)
         assertTrue(controller.state.value.running)
         val sessionId = controller.state.value.sessionId
         assertEquals("sess-20260704-120000", sessionId)
