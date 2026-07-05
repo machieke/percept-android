@@ -65,7 +65,9 @@ class AudioPerceptionEngine(
     asrOverlapSeconds: Int = 1,
     private val tagFrameSamples: Int = DEFAULT_TAG_FRAME_SAMPLES,
     private val tagHopSamples: Int = DEFAULT_TAG_HOP_SAMPLES,
-    ringCapacitySamples: Int = sampleRate * 30,
+    // 90 s: must comfortably exceed the slowest observed ASR window stall
+    // (~33 s on device) or audio is lost to ring overruns.
+    ringCapacitySamples: Int = sampleRate * 90,
     private val rle: AudioTagRunLengthEncoder = AudioTagRunLengthEncoder(),
 ) {
     init {

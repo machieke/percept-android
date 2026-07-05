@@ -94,6 +94,14 @@ Java_org_takopi_percept_perception_audio_NativeWhisper_transcribeNative(
     // session measured ~31 s per 5 s window with autodetect in the loop.
     params.language = lang.c_str();
     params.detect_language = false;
+    // Whisper pads input to 30 s and encodes all 1500 mel positions; cap the
+    // encoder context to the real window length (50 positions/s + margin) so
+    // a 5 s window does not pay the 30 s encoder cost.
+    params.audio_ctx = std::min(
+        1500, static_cast<int>(n_samples / (16000.0 / 50.0)) + 128);
+    // No temperature fallback: a noisy window must not re-run the decode
+    // loop up to 5 times on a device that is already slower than realtime.
+    params.temperature_inc = 0.0f;
     // A window takes ~30 s on this device class; session stop must be able
     // to cancel the in-flight transcription instead of waiting it out.
     wrapper->abort_requested.store(false);

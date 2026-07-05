@@ -71,8 +71,13 @@ object NativeWhisper {
 
     fun isAvailable(): Boolean = loaded
 
-    /** @param modelPath filesystem path of the ggml model (copied out of assets). */
-    fun createBridge(modelPath: String, threads: Int = 4, language: String = "en"): WhisperBridge {
+    /**
+     * @param modelPath filesystem path of the ggml model (copied out of assets).
+     * @param threads 2 by default: the SD695 has two performance cores and
+     *   ggml threads straddling the LITTLE cores slowed whisper down while
+     *   starving the detector.
+     */
+    fun createBridge(modelPath: String, threads: Int = 2, language: String = "en"): WhisperBridge {
         check(isAvailable()) { "native whisper library not available" }
         val context = initContext(modelPath, threads)
         check(context != 0L) { "whisper context init failed for $modelPath" }
