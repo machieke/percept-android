@@ -60,25 +60,29 @@ object NativeWhisper {
     fun isAvailable(): Boolean = loaded
 
     /** @param modelPath filesystem path of the ggml model (copied out of assets). */
-    fun createBridge(modelPath: String, threads: Int = 4): WhisperBridge {
+    fun createBridge(modelPath: String, threads: Int = 4, language: String = "en"): WhisperBridge {
         check(isAvailable()) { "native whisper library not available" }
         val context = initContext(modelPath, threads)
         check(context != 0L) { "whisper context init failed for $modelPath" }
-        return NativeBridge(context)
+        return NativeBridge(context, language)
     }
 
     /** Returns the engine plus the extractionRunId to record in provenance. */
-    fun createEngineOrNoop(modelPath: String?): Pair<AsrEngine, String> =
+    fun createEngineOrNoop(modelPath: String?, language: String = "en"): Pair<AsrEngine, String> =
         if (modelPath != null && isAvailable()) {
-            WhisperAsrEngine(createBridge(modelPath)) to EXTRACTION_RUN_ID
+            WhisperAsrEngine(createBridge(modelPath, language = language), langHint = language) to
+                EXTRACTION_RUN_ID
         } else {
             NoopAsrEngine() to DISABLED_RUN_ID
         }
 
-    private class NativeBridge(private var context: Long) : WhisperBridge {
+    private class NativeBridge(
+        private var context: Long,
+        private val language: String,
+    ) : WhisperBridge {
         override fun transcribe(pcm: FloatArray): List<WhisperBridgeSegment> {
             check(context != 0L) { "bridge closed" }
-            val flat = transcribeNative(context, pcm) ?: return emptyList()
+            val flat = transcribeNative(context, pcm, language) ?: return emptyList()
             // Flat layout per segment: [startMillis, endMillis, avgLogProbMicro] with
             // texts returned in parallel; see jni/whisper_percept.cpp.
             val texts = lastSegmentTexts(context) ?: return emptyList()
@@ -102,7 +106,7 @@ object NativeWhisper {
 
     private external fun initContext(modelPath: String, threads: Int): Long
 
-    private external fun transcribeNative(context: Long, pcm: FloatArray): LongArray?
+    private external fun transcribeNative(context: Long, pcm: FloatArray, language: String): LongArray?
 
     private external fun lastSegmentTexts(context: Long): Array<String>?
 

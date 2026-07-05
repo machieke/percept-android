@@ -133,6 +133,7 @@ class CameraMicrophoneRig(
             extraCounters = mapOf(
                 "asrWindowsProcessed" to audio.asrWindowsProcessed,
                 "asrWindowsTranscribed" to audio.asrWindowsTranscribed,
+                "asrWindowsSkipped" to audio.asrWindowsSkipped,
                 "asrTranscribeMillis" to audio.asrTranscribeMillis,
                 "clockBaseFallbackFrames" to (analyzer?.clockBaseFallbacks ?: 0),
                 "analysisFailures" to (analyzer?.analysisFailureCount ?: 0),

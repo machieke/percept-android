@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "whisper.h"
@@ -53,7 +54,7 @@ Java_org_takopi_percept_perception_audio_NativeWhisper_initContext(
 
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_org_takopi_percept_perception_audio_NativeWhisper_transcribeNative(
-    JNIEnv *env, jobject /*thiz*/, jlong handle, jfloatArray pcm) {
+    JNIEnv *env, jobject /*thiz*/, jlong handle, jfloatArray pcm, jstring language) {
     PerceptWhisper *wrapper = from_handle(handle);
     if (wrapper == nullptr || pcm == nullptr) {
         return nullptr;
@@ -61,6 +62,13 @@ Java_org_takopi_percept_perception_audio_NativeWhisper_transcribeNative(
     const jsize n_samples = env->GetArrayLength(pcm);
     std::vector<float> samples(static_cast<size_t>(n_samples));
     env->GetFloatArrayRegion(pcm, 0, n_samples, samples.data());
+
+    std::string lang = "en";
+    if (language != nullptr) {
+        const char *lang_chars = env->GetStringUTFChars(language, nullptr);
+        lang = lang_chars;
+        env->ReleaseStringUTFChars(language, lang_chars);
+    }
 
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     params.n_threads = wrapper->threads;
@@ -71,6 +79,10 @@ Java_org_takopi_percept_perception_audio_NativeWhisper_transcribeNative(
     params.translate = false;
     params.no_context = true;
     params.single_segment = false;
+    // Pinning the language skips a per-window detection pass; a Moto G84
+    // session measured ~31 s per 5 s window with autodetect in the loop.
+    params.language = lang.c_str();
+    params.detect_language = false;
 
     if (whisper_full(wrapper->ctx, params, samples.data(), n_samples) != 0) {
         return nullptr;

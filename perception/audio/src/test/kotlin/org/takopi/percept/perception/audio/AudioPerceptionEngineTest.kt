@@ -199,6 +199,39 @@ class AudioPerceptionEngineTest {
     }
 
     @Test
+    fun laggingAsrSkipsToFreshestWindowAndCountsDeficit() {
+        val sink = RecordingSink()
+        val asr = FakeAsr { emptyList() }
+        val engine = engine(sink, asr, vadThresholdPerMille = 0)
+
+        // 15 s arrives before the (slow) consumer drains: the cursor jumps
+        // over the stale strides and only the freshest complete window is
+        // transcribed.
+        engine.append(pcm(15.0, speechAmplitude))
+        engine.processAvailable()
+        val counters = engine.finish()
+
+        assertEquals(1L, counters.asrWindowsProcessed)
+        assertEquals(1, asr.calls)
+        assertEquals(2L, counters.asrWindowsSkipped)
+    }
+
+    @Test
+    fun finishSkipsPendingAsrWindowsInsteadOfTranscribing() {
+        val sink = RecordingSink()
+        val asr = FakeAsr { emptyList() }
+        val engine = engine(sink, asr, vadThresholdPerMille = 0)
+
+        // Never drained during the session: stop must not run the backlog.
+        engine.append(pcm(20.0, speechAmplitude))
+        val counters = engine.finish()
+
+        assertEquals(0, asr.calls)
+        assertEquals(0L, counters.asrWindowsProcessed)
+        assertEquals(4L, counters.asrWindowsSkipped)
+    }
+
+    @Test
     fun startTNanosOffsetsAllTimestamps() {
         val sink = RecordingSink()
         val asr = FakeAsr { emptyList() }

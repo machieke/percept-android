@@ -42,6 +42,7 @@ data class AudioRunCounters(
     val lastProcessedTNanos: Long,
     val asrWindowsProcessed: Long,
     val asrWindowsTranscribed: Long,
+    val asrWindowsSkipped: Long,
     val asrTranscribeMillis: Long,
 )
 
@@ -87,6 +88,7 @@ class AudioPerceptionEngine(
     private var overruns = 0L
     private var asrWindowsProcessed = 0L
     private var asrWindowsTranscribed = 0L
+    private var asrWindowsSkipped = 0L
     private var asrTranscribeNanos = 0L
     private var finished = false
 
@@ -117,18 +119,40 @@ class AudioPerceptionEngine(
             lastProcessedTNanos = sampleTNanos(appended),
             asrWindowsProcessed = asrWindowsProcessed,
             asrWindowsTranscribed = asrWindowsTranscribed,
+            asrWindowsSkipped = asrWindowsSkipped,
             asrTranscribeMillis = asrTranscribeNanos / 1_000_000L,
         )
     }
 
     private fun drain(final: Boolean) {
-        // ASR first so tag frames in the same region observe asrActive.
-        while (processNextAsrWindow()) Unit
+        if (final) {
+            // Whisper on the device can run far slower than realtime (first
+            // Moto G84 session: ~31 s per 5 s window); stop must be prompt,
+            // so pending windows are skipped and counted, not transcribed.
+            while (ring.writeIndex >= asrCursor + asrWindowSamples) {
+                asrWindowsSkipped += 1
+                asrCoveredUntilSample = asrCursor + asrWindowSamples
+                asrCursor += asrStrideSamples
+            }
+        } else {
+            // ASR first so tag frames in the same region observe asrActive.
+            while (processNextAsrWindow()) Unit
+        }
         while (processNextTagFrame(final)) Unit
     }
 
     private fun processNextAsrWindow(): Boolean {
         if (ring.writeIndex < asrCursor + asrWindowSamples) return false
+        // When transcription cannot keep up with capture, jump toward the
+        // freshest complete window: transcripts stay current and sparse
+        // instead of arriving minutes late, and the deficit is counted.
+        // Exactly one queued stride is normal batching, not lag.
+        val behind = (ring.writeIndex - asrWindowSamples) - asrCursor
+        if (behind > asrStrideSamples) {
+            val skipped = behind / asrStrideSamples
+            asrWindowsSkipped += skipped
+            asrCursor += skipped * asrStrideSamples
+        }
         val read = ring.readFrom(asrCursor, asrWindowSamples)
         val actualStart = read.nextIndex - read.samples.size
         if (read.overflowed) {

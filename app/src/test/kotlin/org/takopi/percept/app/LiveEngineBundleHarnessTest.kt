@@ -172,8 +172,12 @@ private class SyntheticEngineRig : PerceptionRig {
             tagger = LevelBandTagger(),
             vad = EnergyVad(500),
         )
+        // Interleave appends with draining as the real capture pipeline does;
+        // batch-appending everything would engage the ASR lag-skip.
         engine.append(ShortArray(5 * 16_000) { 25_000 })
+        engine.processAvailable()
         engine.append(ShortArray(10 * 16_000) { 2_000 })
+        engine.processAvailable()
         engine.append(ShortArray(5 * 16_000) { 0 })
         engine.processAvailable()
         return engine.finish()
