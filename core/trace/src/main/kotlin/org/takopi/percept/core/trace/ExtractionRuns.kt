@@ -20,8 +20,10 @@ object ExtractionRuns {
         sourceUrl = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite",
     )
 
+    // Runs on the plain TFLite interpreter: MediaPipe's audio task cannot
+    // share a process with tasks-vision (single framework registry per JNI lib).
     val YAMNET = ModelEntry(
-        runId = "yamnet@mediapipe-0.10.14-cpu",
+        runId = "yamnet@tflite-2.14.0-cpu2",
         assetPath = "models/yamnet.tflite",
         sha256 = "4d8b4a53282dc83ef04e3e7dbc4fbc98082e34e44ed798e16c3a0cdd4c584faf",
         sourceUrl = "https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite",

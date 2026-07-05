@@ -65,6 +65,10 @@ val downloadModels = tasks.register<DownloadModelsTask>("downloadModels") {
                 "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q8_0.bin",
                 "c2085835d3f50733e2ff6e4b41ae8a2b8d8110461e18821b09a15c40c42d1cca",
             ),
+            "yamnet_class_map.csv" to Pair(
+                "https://raw.githubusercontent.com/tensorflow/models/dfffd623b6be8d1d9744b8e261fbac370d17c46d/research/audioset/yamnet/yamnet_class_map.csv",
+                "cdf24d193e196d9e95912a2667051ae203e92a2ba09449218ccb40ef787c6df2",
+            ),
         ),
     )
     outputDir.set(layout.buildDirectory.dir("generated/percept-assets/models"))

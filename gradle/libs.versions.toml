@@ -35,7 +35,7 @@ camerax-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref =
 camerax-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
 guava-android = { module = "com.google.guava:guava", version = "33.0.0-android" }
 mediapipe-tasks-vision = { module = "com.google.mediapipe:tasks-vision", version.ref = "mediapipe-tasks" }
-mediapipe-tasks-audio = { module = "com.google.mediapipe:tasks-audio", version.ref = "mediapipe-tasks" }
+tensorflow-lite = { module = "org.tensorflow:tensorflow-lite", version = "2.14.0" }
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
 compose-material3 = { module = "androidx.compose.material3:material3" }
 compose-ui = { module = "androidx.compose.ui:ui" }

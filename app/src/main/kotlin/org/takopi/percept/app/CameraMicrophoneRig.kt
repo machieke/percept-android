@@ -14,7 +14,7 @@ import org.takopi.percept.core.trace.SessionTimeBase
 import org.takopi.percept.core.trace.TraceSink
 import org.takopi.percept.perception.audio.AudioCapturePipeline
 import org.takopi.percept.perception.audio.AudioPerceptionEngine
-import org.takopi.percept.perception.audio.MediaPipeYamnetTagger
+import org.takopi.percept.perception.audio.TfLiteYamnetTagger
 import org.takopi.percept.perception.audio.NativeWhisper
 import org.takopi.percept.perception.video.FrameRateGovernor
 import org.takopi.percept.perception.video.MediaPipeFrameDetector
@@ -36,7 +36,7 @@ class CameraMicrophoneRig(
     private val lifecycleOwner: LifecycleOwner,
 ) : PerceptionRig {
     private val detector = MediaPipeFrameDetector.createWithFallback(context)
-    private val tagger = MediaPipeYamnetTagger.create(context)
+    private val tagger = TfLiteYamnetTagger.create(context)
     private val asrPair = NativeWhisper.createEngineOrNoop(whisperModelPathOrNull())
 
     override val detectorRunId: String = detector.extractionRunId

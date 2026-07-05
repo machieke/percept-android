@@ -49,6 +49,6 @@ kotlin {
 
 dependencies {
     implementation(project(":core:trace"))
-    implementation(libs.mediapipe.tasks.audio)
+    implementation(libs.tensorflow.lite)
     testImplementation(libs.junit)
 }
