@@ -48,6 +48,119 @@ abstract class DownloadModelsTask : DefaultTask() {
     }
 }
 
+// sherpa-onnx streaming zipformer: AAR for runtime, model files extracted
+// from the pinned release tarball into generated assets.
+abstract class DownloadSherpaAssetsTask : DefaultTask() {
+    @get:Input
+    abstract val url: Property<String>
+
+    @get:Input
+    abstract val sha256: Property<String>
+
+    /** Staging location of the tarball, outside any asset root. */
+    @get:OutputFile
+    abstract val tarballFile: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:javax.inject.Inject
+    abstract val archives: ArchiveOperations
+
+    @get:javax.inject.Inject
+    abstract val fs: FileSystemOperations
+
+    @TaskAction
+    fun downloadAndExtract() {
+        val tarball = tarballFile.get().asFile.apply { parentFile.mkdirs() }
+        if (!tarball.exists() || sha256Of(tarball) != sha256.get()) {
+            URI(url.get()).toURL().openStream().use { input ->
+                tarball.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+        val actual = sha256Of(tarball)
+        check(actual == sha256.get()) {
+            "sha256 mismatch for ${tarball.name}: expected ${sha256.get()}, got $actual"
+        }
+        fs.copy {
+            from(archives.tarTree(tarball)) {
+                include("**/encoder-epoch-99-avg-1.int8.onnx")
+                include("**/decoder-epoch-99-avg-1.onnx")
+                include("**/joiner-epoch-99-avg-1.int8.onnx")
+                include("**/tokens.txt")
+                eachFile { path = name }
+                includeEmptyDirs = false
+            }
+            into(outputDir.get().asFile)
+        }
+    }
+
+    private fun sha256Of(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(1 shl 16)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+}
+
+abstract class DownloadPinnedFileTask : DefaultTask() {
+    @get:Input
+    abstract val url: Property<String>
+
+    @get:Input
+    abstract val sha256: Property<String>
+
+    @get:OutputFile
+    abstract val outputFile: RegularFileProperty
+
+    @TaskAction
+    fun download() {
+        val target = outputFile.get().asFile.apply { parentFile.mkdirs() }
+        if (!target.exists() || sha256Of(target) != sha256.get()) {
+            URI(url.get()).toURL().openStream().use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+        val actual = sha256Of(target)
+        check(actual == sha256.get()) {
+            "sha256 mismatch for ${target.name}: expected ${sha256.get()}, got $actual"
+        }
+    }
+
+    private fun sha256Of(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(1 shl 16)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+}
+
+val sherpaAar = layout.buildDirectory.file("sherpa/sherpa-onnx-1.13.3.aar")
+val downloadSherpaAar = tasks.register<DownloadPinnedFileTask>("downloadSherpaAar") {
+    url.set("https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.3/sherpa-onnx-1.13.3.aar")
+    sha256.set("243ad797a3b6e75ebbeaf7a2ab4aec0777e7d71b730685abb762a120940b07b6")
+    outputFile.set(sherpaAar)
+}
+
+val downloadSherpaModels = tasks.register<DownloadSherpaAssetsTask>("downloadSherpaModels") {
+    url.set("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2")
+    sha256.set("9c559283e8498d3fe95913c79ca1cb454bb26281ac2b102b41306c7d752765d9")
+    tarballFile.set(layout.buildDirectory.file("sherpa/zipformer-en-20m.tar.bz2"))
+    outputDir.set(layout.buildDirectory.dir("generated/percept-sherpa-assets/models/zipformer20m"))
+}
+
 val downloadModels = tasks.register<DownloadModelsTask>("downloadModels") {
     group = "build setup"
     description = "Download model assets with pinned sha256 into generated assets."
@@ -93,6 +206,7 @@ android {
     }
 
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/percept-assets"))
+    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/percept-sherpa-assets"))
 
     testOptions {
         unitTests.isIncludeAndroidResources = true
@@ -105,7 +219,7 @@ kotlin {
 
 // Only asset merging (packaging) pulls the models; unit tests stay offline-safe.
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
-    dependsOn(downloadModels)
+    dependsOn(downloadModels, downloadSherpaModels)
 }
 
 dependencies {
@@ -125,6 +239,7 @@ dependencies {
     implementation(libs.camerax.view)
     implementation(libs.coroutines.core)
     implementation(libs.guava.android)
+    implementation(files(sherpaAar).builtBy(downloadSherpaAar))
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.material3)
     implementation(libs.compose.ui)

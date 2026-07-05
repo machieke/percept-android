@@ -15,6 +15,7 @@ import org.takopi.percept.core.trace.TraceSink
 import org.takopi.percept.perception.audio.AudioCapturePipeline
 import org.takopi.percept.perception.audio.AudioPerceptionEngine
 import org.takopi.percept.perception.audio.CancellableAsrEngine
+import org.takopi.percept.perception.audio.SherpaZipformerAsrEngine
 import org.takopi.percept.perception.audio.TfLiteYamnetTagger
 import org.takopi.percept.perception.audio.NativeWhisper
 import org.takopi.percept.perception.video.FrameRateGovernor
@@ -39,7 +40,7 @@ class CameraMicrophoneRig(
 ) : PerceptionRig {
     private val detector = MediaPipeFrameDetector.createWithFallback(context)
     private val tagger = TfLiteYamnetTagger.create(context)
-    private val asrPair = NativeWhisper.createEngineOrNoop(whisperModelPathOrNull())
+    private val asrPair = createAsrEngine()
 
     override val detectorRunId: String = detector.extractionRunId
     override val sceneGateRunId: String = SCENE_GATE_RUN_ID
@@ -154,6 +155,16 @@ class CameraMicrophoneRig(
 
             PowerManager.THERMAL_STATUS_SEVERE -> ThermalLevel.SEVERE
             else -> ThermalLevel.NOMINAL
+        }
+
+    /** Zipformer (sherpa-onnx) is primary; whisper stays as the fallback. */
+    private fun createAsrEngine(): Pair<org.takopi.percept.perception.audio.AsrEngine, String> =
+        try {
+            val sherpa = SherpaZipformerAsrEngine.create(context)
+            sherpa to sherpa.extractionRunId
+        } catch (t: Throwable) {
+            onError?.invoke("zipformer ASR unavailable (${t.message}); falling back to whisper")
+            NativeWhisper.createEngineOrNoop(whisperModelPathOrNull())
         }
 
     /** whisper.cpp reads the model from a real file, so stage it out of assets once. */
