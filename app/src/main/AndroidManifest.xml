@@ -32,5 +32,15 @@
             android:name=".PerceptRecordingService"
             android:exported="false"
             android:foregroundServiceType="camera|microphone" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="org.takopi.percept.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

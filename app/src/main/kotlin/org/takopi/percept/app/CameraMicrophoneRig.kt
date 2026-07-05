@@ -107,7 +107,12 @@ class CameraMicrophoneRig(
             }
             unbound.await(5, TimeUnit.SECONDS)
         }
-        analysisExecutor?.shutdown()
+        // Drain in-flight analysis before finishing the engine, or the last
+        // frame races finish() and gets miscounted.
+        analysisExecutor?.let { executor ->
+            executor.shutdown()
+            executor.awaitTermination(3, TimeUnit.SECONDS)
+        }
         val video = checkNotNull(videoEngine) { "rig not started" }.finish()
         val audio = checkNotNull(audioPipeline) { "rig not started" }.stop()
         // A poisoned inference graph can throw from close(); the session's

@@ -144,6 +144,19 @@ class VideoPerceptionEngineTest {
     }
 
     @Test
+    fun frameArrivingAfterFinishIsSilentlyIgnored() {
+        val sink = RecordingSink()
+        val engine = VideoPerceptionEngine(sink)
+        engine.onFrame(frame(0, listOf(detection("person", PixelBox(10, 10, 50, 90)))))
+        val counters = engine.finish()
+
+        engine.onFrame(frame(100_000_000L, emptyList()))
+
+        assertEquals(1L, counters.framesProcessed)
+        assertEquals(1, sink.ofType<PerceptionEvent.SceneChange>().size)
+    }
+
+    @Test
     fun longLivedTrackEmitsHeartbeatSegmentAndContinues() {
         val sink = RecordingSink()
         val engine = VideoPerceptionEngine(

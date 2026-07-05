@@ -31,9 +31,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import android.content.Context
+import android.content.Intent
 import kotlinx.coroutines.launch
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     private var permissionsGranted by mutableStateOf(false)
@@ -97,6 +102,7 @@ private fun SessionScreen(
 ) {
     val state by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var endpoint by remember { mutableStateOf(settings.endpointUrl) }
     var token by remember { mutableStateOf(settings.bearerToken) }
 
@@ -139,8 +145,9 @@ private fun SessionScreen(
                 onClick = { scope.launch { controller.exportAndUpload() } },
             ) { Text("Upload") }
         }
-        state.lastExportPath?.let { path ->
-            Text(text = "exported: $path", style = MaterialTheme.typography.bodySmall)
+        (state.lastExportPath ?: controller.latestBundleZipPath())?.let { path ->
+            Text(text = "bundle: $path", style = MaterialTheme.typography.bodySmall)
+            OutlinedButton(onClick = { shareBundle(context, path) }) { Text("Share bundle") }
         }
         state.lastUploadStatus?.let { status ->
             Text(text = "upload: $status", style = MaterialTheme.typography.bodySmall)
@@ -190,6 +197,17 @@ private fun SessionScreen(
             }
         }
     }
+}
+
+/** Bundle zips live in app-scoped storage other apps cannot browse; a share
+ *  intent with a FileProvider URI is how they leave the device (§3.6 v1a). */
+private fun shareBundle(context: Context, path: String) {
+    val uri = FileProvider.getUriForFile(context, "org.takopi.percept.fileprovider", File(path))
+    val send = Intent(Intent.ACTION_SEND)
+        .setType("application/zip")
+        .putExtra(Intent.EXTRA_STREAM, uri)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    context.startActivity(Intent.createChooser(send, "Share bundle"))
 }
 
 @Composable

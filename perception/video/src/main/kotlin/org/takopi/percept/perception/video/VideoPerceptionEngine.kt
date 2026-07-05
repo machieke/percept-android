@@ -41,7 +41,9 @@ class VideoPerceptionEngine(
     private var finished = false
 
     fun onFrame(frame: FrameObservation) {
-        check(!finished) { "engine already finished" }
+        // Camera teardown races a final in-flight frame past finish(); the
+        // session is over, so it is a silent drop rather than an error.
+        if (finished) return
         val frameIndex = framesProcessed
         framesProcessed += 1
         lastFrameTNanos = maxOf(lastFrameTNanos, frame.tNanos)

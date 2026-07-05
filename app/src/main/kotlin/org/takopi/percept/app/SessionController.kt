@@ -286,6 +286,13 @@ class SessionController(
             .toPath()
             .resolve("percept-bundles")
 
+    /** Newest exported zip on disk; survives app restarts unlike UI state. */
+    fun latestBundleZipPath(): String? =
+        exportRoot().toFile()
+            .listFiles { file -> file.isFile && file.name.endsWith(".zip") }
+            ?.maxByOrNull { it.lastModified() }
+            ?.absolutePath
+
     private fun onEventIngested(event: IngestedEvent) {
         val entry = TickerEntry(
             valueKind = event.pointer.entryString("valueKind"),
