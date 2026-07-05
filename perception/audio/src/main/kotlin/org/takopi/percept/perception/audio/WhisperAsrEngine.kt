@@ -7,6 +7,14 @@ package org.takopi.percept.perception.audio
  */
 interface WhisperBridge : AutoCloseable {
     fun transcribe(pcm: FloatArray): List<WhisperBridgeSegment>
+
+    /** Requests early return of an in-flight [transcribe] on another thread. */
+    fun cancelInFlight() {}
+}
+
+/** ASR engines whose in-flight work can be cancelled at session stop. */
+interface CancellableAsrEngine : AsrEngine {
+    fun cancelInFlight()
 }
 
 data class WhisperBridgeSegment(
@@ -19,7 +27,11 @@ data class WhisperBridgeSegment(
 class WhisperAsrEngine(
     private val bridge: WhisperBridge,
     private val langHint: String = "en",
-) : AsrEngine {
+) : CancellableAsrEngine {
+    override fun cancelInFlight() {
+        bridge.cancelInFlight()
+    }
+
     override fun transcribe(samples: ShortArray, sampleRate: Int): List<AsrWindowSegment> {
         val floats = FloatArray(samples.size) { index -> samples[index] / 32768f }
         return bridge.transcribe(floats).mapNotNull { segment ->
@@ -96,6 +108,12 @@ object NativeWhisper {
             }
         }
 
+        override fun cancelInFlight() {
+            if (context != 0L) {
+                requestAbort(context)
+            }
+        }
+
         override fun close() {
             if (context != 0L) {
                 freeContext(context)
@@ -107,6 +125,8 @@ object NativeWhisper {
     private external fun initContext(modelPath: String, threads: Int): Long
 
     private external fun transcribeNative(context: Long, pcm: FloatArray, language: String): LongArray?
+
+    private external fun requestAbort(context: Long)
 
     private external fun lastSegmentTexts(context: Long): Array<String>?
 

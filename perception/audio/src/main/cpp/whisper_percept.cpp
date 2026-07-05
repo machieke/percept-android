@@ -4,6 +4,7 @@
 
 #include <jni.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -16,6 +17,7 @@ namespace {
 struct PerceptWhisper {
     whisper_context *ctx;
     int threads;
+    std::atomic<bool> abort_requested{false};
 };
 
 PerceptWhisper *from_handle(jlong handle) {
@@ -52,6 +54,15 @@ Java_org_takopi_percept_perception_audio_NativeWhisper_initContext(
     return reinterpret_cast<jlong>(wrapper);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_org_takopi_percept_perception_audio_NativeWhisper_requestAbort(
+    JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    PerceptWhisper *wrapper = from_handle(handle);
+    if (wrapper != nullptr) {
+        wrapper->abort_requested.store(true);
+    }
+}
+
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_org_takopi_percept_perception_audio_NativeWhisper_transcribeNative(
     JNIEnv *env, jobject /*thiz*/, jlong handle, jfloatArray pcm, jstring language) {
@@ -83,6 +94,13 @@ Java_org_takopi_percept_perception_audio_NativeWhisper_transcribeNative(
     // session measured ~31 s per 5 s window with autodetect in the loop.
     params.language = lang.c_str();
     params.detect_language = false;
+    // A window takes ~30 s on this device class; session stop must be able
+    // to cancel the in-flight transcription instead of waiting it out.
+    wrapper->abort_requested.store(false);
+    params.abort_callback = [](void *user_data) -> bool {
+        return static_cast<PerceptWhisper *>(user_data)->abort_requested.load();
+    };
+    params.abort_callback_user_data = wrapper;
 
     if (whisper_full(wrapper->ctx, params, samples.data(), n_samples) != 0) {
         return nullptr;

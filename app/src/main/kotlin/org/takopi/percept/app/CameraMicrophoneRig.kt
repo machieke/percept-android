@@ -14,6 +14,7 @@ import org.takopi.percept.core.trace.SessionTimeBase
 import org.takopi.percept.core.trace.TraceSink
 import org.takopi.percept.perception.audio.AudioCapturePipeline
 import org.takopi.percept.perception.audio.AudioPerceptionEngine
+import org.takopi.percept.perception.audio.CancellableAsrEngine
 import org.takopi.percept.perception.audio.TfLiteYamnetTagger
 import org.takopi.percept.perception.audio.NativeWhisper
 import org.takopi.percept.perception.video.FrameRateGovernor
@@ -116,6 +117,9 @@ class CameraMicrophoneRig(
             executor.awaitTermination(3, TimeUnit.SECONDS)
         }
         val video = checkNotNull(videoEngine) { "rig not started" }.finish()
+        // A whisper window runs ~30 s on this device; abort the in-flight
+        // transcription so the audio processing thread can be joined promptly.
+        (asrPair.first as? CancellableAsrEngine)?.cancelInFlight()
         val audio = checkNotNull(audioPipeline) { "rig not started" }.stop()
         // A poisoned inference graph can throw from close(); the session's
         // data is already safe, so never let teardown fail the stop.

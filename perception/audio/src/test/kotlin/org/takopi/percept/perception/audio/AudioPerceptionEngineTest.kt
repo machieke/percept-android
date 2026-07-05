@@ -163,6 +163,8 @@ class AudioPerceptionEngineTest {
         val engine = engine(sink, asr)
 
         engine.append(pcm(9.0, speechAmplitude))
+        // One ASR window per drain call; both complete windows need two.
+        engine.processAvailable()
         engine.processAvailable()
         engine.finish()
 

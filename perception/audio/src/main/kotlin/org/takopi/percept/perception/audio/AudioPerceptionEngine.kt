@@ -135,8 +135,11 @@ class AudioPerceptionEngine(
                 asrCursor += asrStrideSamples
             }
         } else {
-            // ASR first so tag frames in the same region observe asrActive.
-            while (processNextAsrWindow()) Unit
+            // ASR first so tag frames in the same region observe asrActive —
+            // but at most ONE window per call: at RTF > 1 a new window always
+            // completes while the previous one transcribes, so an exhaustive
+            // loop here never returns and stop requests are never observed.
+            processNextAsrWindow()
         }
         while (processNextTagFrame(final)) Unit
     }
