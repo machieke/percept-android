@@ -2,16 +2,11 @@ package org.takopi.percept.perception.video
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
-import java.io.ByteArrayOutputStream
 import kotlin.math.roundToInt
 
 /**
@@ -25,12 +20,16 @@ class MediaPipeFrameDetector private constructor(
 ) : FrameDetector {
 
     override fun detect(nv21: ByteArray, width: Int, height: Int): List<VideoDetection> {
-        val jpeg = ByteArrayOutputStream().also { output ->
-            YuvImage(nv21, ImageFormat.NV21, width, height, null)
-                .compressToJpeg(Rect(0, 0, width, height), DETECT_JPEG_QUALITY, output)
-        }.toByteArray()
-        val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
-            ?: return emptyList()
+        // Direct integer YUV→RGB at half resolution: the model letterboxes to
+        // 320×320 anyway, and the former JPEG round trip dominated the frame
+        // budget. Boxes are reported in this (width/2 × height/2) space.
+        val argb = YuvToRgb.nv21ToArgb(nv21, width, height, DETECT_SUBSAMPLE)
+        val bitmap = Bitmap.createBitmap(
+            argb,
+            width / DETECT_SUBSAMPLE,
+            height / DETECT_SUBSAMPLE,
+            Bitmap.Config.ARGB_8888,
+        )
         return detectBitmap(bitmap)
     }
 
@@ -70,7 +69,7 @@ class MediaPipeFrameDetector private constructor(
     companion object {
         const val LABEL_SPACE: String = "coco-80"
         const val MODEL_ASSET_PATH: String = "models/efficientdet_lite0_int8.tflite"
-        private const val DETECT_JPEG_QUALITY: Int = 90
+        const val DETECT_SUBSAMPLE: Int = 2
         private const val PROBE_SIZE: Int = 64
 
         fun create(

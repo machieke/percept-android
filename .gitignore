@@ -7,3 +7,4 @@ build/
 local.properties
 .android-sdk/
 reference/event-trace-memory/
+captures/

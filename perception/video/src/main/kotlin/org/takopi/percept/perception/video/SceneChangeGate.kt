@@ -36,50 +36,88 @@ enum class SceneChangeReason {
     LUMINANCE_DISTANCE,
 }
 
+/**
+ * Detection-set + luminance scene gate with hysteresis. Marginal detections
+ * flicker in and out frame to frame, so a changed detection set only fires
+ * after holding for [signatureHoldFrames] consecutive frames, and no two
+ * scene changes fire within [minIntervalNanos] (a real Moto G84 session
+ * produced 32 scene changes in 48 frames without this).
+ */
 class SceneChangeGate(
     private val luminanceThresholdPerMille: Int = 250,
+    private val signatureHoldFrames: Int = 3,
+    private val minIntervalNanos: Long = 2_000_000_000L,
 ) {
     init {
         require(luminanceThresholdPerMille in 0..1000) {
             "luminanceThresholdPerMille must be in 0..1000"
         }
+        require(signatureHoldFrames >= 1) { "signatureHoldFrames must be >= 1" }
+        require(minIntervalNanos >= 0) { "minIntervalNanos must be non-negative" }
     }
 
     private var lastHistogram: LuminanceHistogram? = null
-    private var lastDetectionSignature: Set<String>? = null
+    private var emittedSignature: Set<String>? = null
+    private var candidateSignature: Set<String>? = null
+    private var candidateFrames = 0
+    private var lastSceneTNanos = 0L
     private var nextSceneIndex = 0
 
     fun process(frame: SceneGateFrame): SceneChange? {
         val previousHistogram = lastHistogram
-        val previousSignature = lastDetectionSignature
+        lastHistogram = frame.histogram
         val signature = detectionSetSignature(frame.detections)
 
-        lastHistogram = frame.histogram
-        lastDetectionSignature = signature
-
-        if (previousHistogram == null || previousSignature == null) {
+        if (emittedSignature == null) {
+            emittedSignature = signature
             return sceneChange(frame.tNanos, 1000, SceneChangeReason.FIRST_FRAME)
         }
 
-        if (signature != previousSignature) {
+        val cooledDown = frame.tNanos - lastSceneTNanos >= minIntervalNanos
+
+        if (previousHistogram != null && cooledDown) {
+            val distance = l1DistancePerMille(previousHistogram, frame.histogram)
+            if (distance >= luminanceThresholdPerMille) {
+                // The view changed wholesale; adopt the current detection set
+                // so it does not immediately re-fire as a set change.
+                emittedSignature = signature
+                clearCandidate()
+                return sceneChange(frame.tNanos, distance, SceneChangeReason.LUMINANCE_DISTANCE)
+            }
+        }
+
+        if (signature == emittedSignature) {
+            clearCandidate()
+            return null
+        }
+        if (signature == candidateSignature) {
+            candidateFrames += 1
+        } else {
+            candidateSignature = signature
+            candidateFrames = 1
+        }
+        if (candidateFrames >= signatureHoldFrames && cooledDown) {
+            emittedSignature = signature
+            clearCandidate()
             return sceneChange(frame.tNanos, 1000, SceneChangeReason.DETECTION_SET_CHANGE)
         }
-
-        val distance = l1DistancePerMille(previousHistogram, frame.histogram)
-        if (distance >= luminanceThresholdPerMille) {
-            return sceneChange(frame.tNanos, distance, SceneChangeReason.LUMINANCE_DISTANCE)
-        }
-
         return null
     }
 
-    private fun sceneChange(tNanos: Long, metricPerMille: Int, reason: SceneChangeReason): SceneChange =
-        SceneChange(
+    private fun clearCandidate() {
+        candidateSignature = null
+        candidateFrames = 0
+    }
+
+    private fun sceneChange(tNanos: Long, metricPerMille: Int, reason: SceneChangeReason): SceneChange {
+        lastSceneTNanos = tNanos
+        return SceneChange(
             sceneIndex = nextSceneIndex++,
             tNanos = tNanos,
             metricPerMille = metricPerMille.coerceIn(0, 1000),
             reason = reason,
         )
+    }
 
     private fun detectionSetSignature(detections: List<VideoDetection>): Set<String> =
         detections

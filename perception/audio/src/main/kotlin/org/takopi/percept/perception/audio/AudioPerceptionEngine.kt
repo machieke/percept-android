@@ -40,6 +40,9 @@ data class AudioRunCounters(
     val ringBufferOverruns: Long,
     val appendedSamples: Long,
     val lastProcessedTNanos: Long,
+    val asrWindowsProcessed: Long,
+    val asrWindowsTranscribed: Long,
+    val asrTranscribeMillis: Long,
 )
 
 /**
@@ -82,6 +85,9 @@ class AudioPerceptionEngine(
     private var asrCoveredUntilSample = 0L
     private var lastAsrEmittedEndNanos = 0L
     private var overruns = 0L
+    private var asrWindowsProcessed = 0L
+    private var asrWindowsTranscribed = 0L
+    private var asrTranscribeNanos = 0L
     private var finished = false
 
     // Sample ranges of speech-active ASR windows, for Speech-tag suppression.
@@ -109,6 +115,9 @@ class AudioPerceptionEngine(
             ringBufferOverruns = overruns,
             appendedSamples = appended,
             lastProcessedTNanos = sampleTNanos(appended),
+            asrWindowsProcessed = asrWindowsProcessed,
+            asrWindowsTranscribed = asrWindowsTranscribed,
+            asrTranscribeMillis = asrTranscribeNanos / 1_000_000L,
         )
     }
 
@@ -125,10 +134,15 @@ class AudioPerceptionEngine(
         if (read.overflowed) {
             overruns += 1
         }
+        asrWindowsProcessed += 1
         if (vad.isSpeech(read.samples)) {
+            asrWindowsTranscribed += 1
             speechActiveRanges.addLast(actualStart until actualStart + read.samples.size)
             val windowStartNanos = sampleTNanos(actualStart)
-            for (segment in asr.transcribe(read.samples, sampleRate)) {
+            val transcribeStart = System.nanoTime()
+            val segments = asr.transcribe(read.samples, sampleRate)
+            asrTranscribeNanos += System.nanoTime() - transcribeStart
+            for (segment in segments) {
                 submitAsrSegment(windowStartNanos, segment)
             }
         }
@@ -216,7 +230,13 @@ class AudioPerceptionEngine(
 
     companion object {
         const val DEFAULT_SAMPLE_RATE: Int = 16_000
-        const val DEFAULT_VAD_THRESHOLD_PER_MILLE: Int = 20
+
+        /**
+         * Mean-abs per-mille of full scale. The first device session showed a
+         * Speech tag but zero transcribed windows at 20; quiet phone-mic
+         * speech sits low, so keep the energy gate permissive.
+         */
+        const val DEFAULT_VAD_THRESHOLD_PER_MILLE: Int = 5
 
         /** 0.975 s YAMNet frame at 16 kHz. */
         const val DEFAULT_TAG_FRAME_SAMPLES: Int = 15_600

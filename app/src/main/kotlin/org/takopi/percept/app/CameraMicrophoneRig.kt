@@ -52,6 +52,7 @@ class CameraMicrophoneRig(
     private var audioPipeline: AudioCapturePipeline? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var analysisExecutor: ExecutorService? = null
+    private var analyzer: PerceptFrameAnalyzer? = null
     private var timeBase: SessionTimeBase? = null
 
     override fun start(sink: TraceSink, timeBase: SessionTimeBase) {
@@ -68,6 +69,7 @@ class CameraMicrophoneRig(
                 onError?.invoke("video analysis failing: ${e.message}")
             },
         )
+        this.analyzer = analyzer
         val executor = Executors.newSingleThreadExecutor()
         analysisExecutor = executor
         val analysis = ImageAnalysis.Builder()
@@ -126,6 +128,15 @@ class CameraMicrophoneRig(
             droppedFrames = video.droppedFrames,
             audioRingBufferOverruns = audio.ringBufferOverruns,
             thermalThrottleEvents = governor.thermalThrottleEvents,
+            // Device diagnostics for the M4/M5 tuning loop: was ASR gated out
+            // by VAD, too slow, or fine? Did the HAL clock base fall back?
+            extraCounters = mapOf(
+                "asrWindowsProcessed" to audio.asrWindowsProcessed,
+                "asrWindowsTranscribed" to audio.asrWindowsTranscribed,
+                "asrTranscribeMillis" to audio.asrTranscribeMillis,
+                "clockBaseFallbackFrames" to (analyzer?.clockBaseFallbacks ?: 0),
+                "analysisFailures" to (analyzer?.analysisFailureCount ?: 0),
+            ),
         )
     }
 

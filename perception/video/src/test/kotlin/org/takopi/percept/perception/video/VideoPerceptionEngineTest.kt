@@ -84,7 +84,10 @@ class VideoPerceptionEngineTest {
     @Test
     fun luminanceJumpEmitsSecondSceneChange() {
         val sink = RecordingSink()
-        val engine = VideoPerceptionEngine(sink)
+        val engine = VideoPerceptionEngine(
+            sink,
+            gate = SceneChangeGate(minIntervalNanos = 0),
+        )
         val steady = listOf(detection("person", PixelBox(10, 10, 50, 90)))
 
         engine.onFrame(frame(0, steady, flatHistogram))

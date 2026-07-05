@@ -26,10 +26,22 @@ fun sessionStopPayload(
     tEndNanos: Long,
     observedAt: String,
     counters: SessionStopCounters,
+    extraCounters: Map<String, Long> = emptyMap(),
 ) = run {
     require(sessionId.isNotBlank()) { "sessionId must not be blank" }
     require(tStartNanos >= 0) { "tStartNanos must be non-negative" }
     require(tEndNanos >= tStartNanos) { "tEndNanos must be >= tStartNanos" }
+    val counterEntries = linkedMapOf<String, org.takopi.percept.core.canonical.CanonicalValue>(
+        "framesProcessed" to CLong(counters.framesProcessed),
+        "eventsEmitted" to CLong(counters.eventsEmitted),
+        "droppedFrames" to CLong(counters.droppedFrames),
+        "audioRingBufferOverruns" to CLong(counters.audioRingBufferOverruns),
+        "thermalThrottleEvents" to CLong(counters.thermalThrottleEvents),
+    )
+    for ((key, value) in extraCounters) {
+        require(key !in counterEntries) { "extra counter shadows core counter: $key" }
+        counterEntries[key] = CLong(value)
+    }
     cMap(
         "kind" to CString("raw-payload"),
         "schema" to CString("perception-session-stop-v0.1"),
@@ -37,12 +49,6 @@ fun sessionStopPayload(
         "tStartNanos" to CLong(tStartNanos),
         "tEndNanos" to CLong(tEndNanos),
         "observedAt" to CString(observedAt),
-        "counters" to cMap(
-            "framesProcessed" to CLong(counters.framesProcessed),
-            "eventsEmitted" to CLong(counters.eventsEmitted),
-            "droppedFrames" to CLong(counters.droppedFrames),
-            "audioRingBufferOverruns" to CLong(counters.audioRingBufferOverruns),
-            "thermalThrottleEvents" to CLong(counters.thermalThrottleEvents),
-        ),
+        "counters" to org.takopi.percept.core.canonical.CMap(counterEntries),
     )
 }

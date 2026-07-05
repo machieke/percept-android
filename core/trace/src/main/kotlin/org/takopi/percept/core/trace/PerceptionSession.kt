@@ -34,6 +34,8 @@ data class PerceptionRunCounters(
     val droppedFrames: Long,
     val audioRingBufferOverruns: Long,
     val thermalThrottleEvents: Long,
+    /** Diagnostic counters merged into the stop payload (e.g. ASR timing). */
+    val extraCounters: Map<String, Long> = emptyMap(),
 )
 
 data class PerceptionSessionStats(
@@ -134,6 +136,7 @@ class PerceptionSession(
                     audioRingBufferOverruns = counters.audioRingBufferOverruns,
                     thermalThrottleEvents = counters.thermalThrottleEvents,
                 ),
+                extraCounters = counters.extraCounters,
             ),
             observedAt = observedAt,
             actorPath = appActorPath(),

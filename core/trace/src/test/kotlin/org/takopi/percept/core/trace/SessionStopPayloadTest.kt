@@ -30,6 +30,46 @@ class SessionStopPayloadTest {
     }
 
     @Test
+    fun extraCountersMergeIntoCountersMap() {
+        val payload = sessionStopPayload(
+            sessionId = "sess-0001",
+            tStartNanos = 0,
+            tEndNanos = 1_000_000_000,
+            observedAt = "2026-07-04T12:00:01Z",
+            counters = SessionStopCounters(
+                framesProcessed = 1,
+                eventsEmitted = 2,
+                droppedFrames = 0,
+                audioRingBufferOverruns = 0,
+                thermalThrottleEvents = 0,
+            ),
+            extraCounters = mapOf("asrWindowsProcessed" to 4L, "asrTranscribeMillis" to 950L),
+        )
+
+        val bytes = canonicalBytes(payload).toString(StandardCharsets.UTF_8)
+        assertEquals(
+            true,
+            bytes.contains(
+                """"counters":{"asrTranscribeMillis":950,"asrWindowsProcessed":4,"audioRingBufferOverruns":0""",
+            ),
+        )
+    }
+
+    @Test
+    fun extraCounterCannotShadowCoreCounter() {
+        assertThrows(IllegalArgumentException::class.java) {
+            sessionStopPayload(
+                sessionId = "sess-0001",
+                tStartNanos = 0,
+                tEndNanos = 1,
+                observedAt = "2026-07-04T12:00:01Z",
+                counters = SessionStopCounters(0, 0, 0, 0, 0),
+                extraCounters = mapOf("framesProcessed" to 99L),
+            )
+        }
+    }
+
+    @Test
     fun rejectsNegativeCountersAndBackwardTiming() {
         assertThrows(IllegalArgumentException::class.java) {
             SessionStopCounters(

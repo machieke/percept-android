@@ -106,11 +106,13 @@ class AudioPerceptionEngineTest {
         engine.processAvailable()
         engine.append(pcm(4.0, musicAmplitude))
         engine.processAvailable()
-        engine.finish()
+        val counters = engine.finish()
 
         // Second window (4 s..9 s) mixes 1 s speech + 4 s music and falls
         // below the VAD threshold, so ASR ran exactly once.
         assertEquals(1, asr.calls)
+        assertEquals(2L, counters.asrWindowsProcessed)
+        assertEquals(1L, counters.asrWindowsTranscribed)
 
         val asrSegments = sink.ofType<PerceptionEvent.AsrSegment>()
         assertEquals(1, asrSegments.size)
