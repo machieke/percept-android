@@ -106,11 +106,12 @@ def _phonetic_norm(word: str) -> str:
     return "".join(collapsed)
 
 
-def _acoustically_plausible(original: str, corrected: str, min_ratio: float = 0.65) -> bool:
+def _acoustically_plausible(original: str, corrected: str, min_ratio: float = 0.70) -> bool:
     """Each replaced span must sound like what the recognizer heard. Measured
     on real cases (max of raw and phonetically-normalized similarity): good
-    fixes score 0.71-1.00, scene-plausible-but-wrong swaps <= 0.55
-    ("kalslost"->"kaas" was such a failure)."""
+    fixes score 0.71-1.00; bad swaps score <= 0.67 — "kalslost"->"kaas"
+    (scene-plausible, 0.55) and "zonnebril"->"bril" (information-dropping,
+    0.67) both occurred in real sessions and are blocked."""
     import difflib
 
     for heard, proposed in _replaced_word_pairs(original, corrected):
