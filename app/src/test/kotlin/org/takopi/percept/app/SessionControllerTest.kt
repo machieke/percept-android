@@ -152,6 +152,66 @@ class SessionControllerTest {
     }
 
     @Test
+    fun ackedUploadEvictsArtifactsFromLeanBuffer() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        androidx.work.testing.WorkManagerTestInitHelper.initializeTestWorkManager(context)
+        PerceptSettings(context).endpointUrl = "http://memory.invalid:8124"
+        val uploader = object : org.takopi.percept.dispatch.BundleUploader {
+            var uploads = 0
+
+            override fun upload(
+                bundleZip: java.nio.file.Path,
+                destination: org.takopi.percept.dispatch.BundleUploadDestination,
+            ): org.takopi.percept.dispatch.BundleUploadResult {
+                uploads += 1
+                return org.takopi.percept.dispatch.BundleUploadResult(true, 200, "ok")
+            }
+        }
+        val controller = SessionController(
+            appContext = context,
+            databaseFactory = { database },
+            monotonicNanos = { 1_000_000L },
+            wallClockMillis = { Instant.parse("2026-07-06T09:00:00Z").toEpochMilli() },
+            uploader = uploader,
+            autoDispatchIntervalMillis = Long.MAX_VALUE / 2,
+            retentionCapBytes = 0,
+        )
+
+        val rig = FakeRig()
+        controller.startSessionAndWait(rig)
+        val chunkBytes = ByteArray(50_000) { 7 }
+        rig.sink!!.trySubmit(
+            PerceptionEvent.AudioChunk(
+                chunkIndex = 0,
+                tStartNanos = 0,
+                tEndNanos = 5_000_000_000L,
+                sampleRate = 16_000,
+                sampleCount = 80_000,
+                contentType = "audio/ogg; codecs=opus",
+                codecId = "test",
+                encoded = chunkBytes,
+            ),
+        )
+        controller.stopSessionAndWait()
+
+        val chunkCid = org.takopi.percept.core.canonical.cidForBytes(chunkBytes)
+        val chunkObject = controller.daRoot
+            .resolve("objects")
+            .resolve(chunkCid.substringAfterLast(':'))
+        assertTrue(java.nio.file.Files.exists(chunkObject))
+
+        val result = controller.exportAndUpload()
+
+        assertEquals(1, uploader.uploads)
+        assertEquals(3, result!!.ackedEvents)
+        // Lean buffer: the acked audio artifact is physically gone.
+        assertFalse(java.nio.file.Files.exists(chunkObject))
+        val index = RoomEventIndex(database)
+        assertEquals(0, index.eventsByDispatchState(DispatchState.PENDING).size)
+        assertEquals(3, index.eventsByDispatchState(DispatchState.ACKED).size)
+    }
+
+    @Test
     fun rigStopFailureStillIngestsSessionStop() = runBlocking {
         val rig = object : PerceptionRig {
             override val detectorRunId = "fake-detector-v0@robolectric"

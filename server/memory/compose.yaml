@@ -1,0 +1,17 @@
+services:
+  percept-memory:
+    build: .
+    container_name: percept-memory
+    ports:
+      - "8124:8000"
+    volumes:
+      - percept-memory-data:/data
+    environment:
+      - ASR_URL=http://host.docker.internal:8123
+      # - MEMORY_TOKEN=change-me   # uncomment to require a bearer token
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  percept-memory-data:

@@ -7,6 +7,8 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -26,6 +28,11 @@ import org.takopi.percept.dispatch.BundleExportResult
 import org.takopi.percept.dispatch.BundleUploadDestination
 import org.takopi.percept.dispatch.BundleUploadDispatchResult
 import org.takopi.percept.dispatch.BundleUploadWorker
+import org.takopi.percept.dispatch.BundleUploader
+import org.takopi.percept.dispatch.DaRetentionCandidateCollector
+import org.takopi.percept.dispatch.FileRetentionEvictor
+import org.takopi.percept.dispatch.HttpBundleUploader
+import org.takopi.percept.dispatch.RetentionPlanner
 import java.net.URL
 import java.nio.file.Path
 import java.text.SimpleDateFormat
@@ -67,6 +74,9 @@ class SessionController(
     },
     private val monotonicNanos: () -> Long = SystemClock::elapsedRealtimeNanos,
     private val wallClockMillis: () -> Long = System::currentTimeMillis,
+    private val uploader: BundleUploader = HttpBundleUploader(),
+    private val autoDispatchIntervalMillis: Long = DEFAULT_AUTO_DISPATCH_MILLIS,
+    private val retentionCapBytes: Long = BundleUploadWorker.LEAN_CAP_BYTES,
 ) {
     private val stateFlow = MutableStateFlow(SessionUiState())
     val state: StateFlow<SessionUiState> = stateFlow
@@ -84,11 +94,12 @@ class SessionController(
     private val da by lazy { FileDA(daRoot) }
     private val database by lazy { databaseFactory(appContext) }
     private val index by lazy { RoomEventIndex(database) }
-    private val coordinator by lazy { BundleDispatchCoordinator(index) }
+    private val coordinator by lazy { BundleDispatchCoordinator(index, uploader = uploader) }
 
     private var session: PerceptionSession? = null
     private var rig: PerceptionRig? = null
     private var activeTimeBase: SessionTimeBase? = null
+    private var autoDispatchJob: Job? = null
     private var starting = false
     private var bundleSequence = 0
 
@@ -163,6 +174,16 @@ class SessionController(
             activeTimeBase = timeBase
             starting = false
         }
+        // Continuous accumulation: dispatch mid-session so long recordings
+        // reach the memory server as they happen, not only at stop.
+        if (settings.endpointUrl.isNotBlank()) {
+            autoDispatchJob = scope.launch {
+                while (true) {
+                    delay(autoDispatchIntervalMillis)
+                    runCatching { exportAndUpload() }
+                }
+            }
+        }
     }
 
     fun stopSession(onStopped: (() -> Unit)? = null) {
@@ -179,6 +200,8 @@ class SessionController(
     }
 
     suspend fun stopSessionAndWait() {
+        autoDispatchJob?.cancel()
+        autoDispatchJob = null
         val (activeSession, activeRig) = synchronized(this) {
             val pair = session to rig
             session = null
@@ -216,6 +239,15 @@ class SessionController(
     private fun scheduleBackgroundUploadIfConfigured() {
         val endpoint = settings.endpointUrl
         if (endpoint.isBlank()) return
+        // Immediately flush this session's remainder, then keep the hourly
+        // sweeper alive for anything a dead network leaves behind.
+        BundleUploadWorker.enqueueImmediate(
+            context = appContext,
+            endpoint = endpoint,
+            token = settings.bearerToken.ifBlank { null },
+            daRoot = daRoot.toString(),
+            outputRoot = exportRoot().toString(),
+        )
         BundleUploadWorker.schedulePeriodic(
             context = appContext,
             endpoint = endpoint,
@@ -271,6 +303,12 @@ class SessionController(
                     } ?: "nothing to upload",
                 )
             }
+            if (result.ackedEvents > 0) {
+                // Lean buffer: shed acked artifacts beyond the local cap.
+                val candidates = DaRetentionCandidateCollector(index).collect(daRoot)
+                val plan = RetentionPlanner().planEviction(candidates, capBytes = retentionCapBytes)
+                FileRetentionEvictor().evict(plan.evict)
+            }
             result
         }
     }
@@ -317,6 +355,7 @@ class SessionController(
     companion object {
         const val TICKER_LIMIT: Int = 20
         const val EVENT_ID_PREFIX_CHARS: Int = 18
+        const val DEFAULT_AUTO_DISPATCH_MILLIS: Long = 5L * 60L * 1000L
     }
 }
 
