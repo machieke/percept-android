@@ -212,6 +212,76 @@ class SessionControllerTest {
     }
 
     @Test
+    fun liveStreamDeliversAndAcksEventsWithoutBundles() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        androidx.work.testing.WorkManagerTestInitHelper.initializeTestWorkManager(context)
+        val received = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val server = java.net.ServerSocket(0)
+        val acceptor = kotlin.concurrent.thread {
+            try {
+                while (true) {
+                    server.accept().use { socket ->
+                        val input = socket.getInputStream().bufferedReader()
+                        var contentLength = 0
+                        while (true) {
+                            val line = input.readLine() ?: break
+                            if (line.isEmpty()) break
+                            if (line.lowercase().startsWith("content-length:")) {
+                                contentLength = line.substringAfter(':').trim().toInt()
+                            }
+                        }
+                        val body = CharArray(contentLength)
+                        var read = 0
+                        while (read < contentLength) {
+                            val n = input.read(body, read, contentLength - read)
+                            if (n < 0) break
+                            read += n
+                        }
+                        received.add(String(body))
+                        val response = """{"ok":true}"""
+                        socket.getOutputStream().write(
+                            ("HTTP/1.1 200 OK\r\nContent-Length: ${response.length}\r\n" +
+                                "Connection: close\r\n\r\n$response").toByteArray(),
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+                // closed on shutdown
+            }
+        }
+        PerceptSettings(context).endpointUrl = "http://127.0.0.1:${server.localPort}"
+        val controller = SessionController(
+            appContext = context,
+            databaseFactory = { database },
+            monotonicNanos = { 1_000_000L },
+            wallClockMillis = { Instant.parse("2026-07-06T10:00:00Z").toEpochMilli() },
+            autoDispatchIntervalMillis = Long.MAX_VALUE / 2,
+        )
+
+        val rig = FakeRig()
+        controller.startSessionAndWait(rig)
+        rig.sink!!.trySubmit(
+            PerceptionEvent.SceneChange(
+                sceneIndex = 0,
+                tNanos = 1_000_000_000L,
+                gateMetricPerMille = 1000,
+                keyframeJpeg = byteArrayOf(1, 2, 3),
+            ),
+        )
+        controller.stopSessionAndWait()
+        server.close()
+        acceptor.join(2_000)
+
+        // session-start + scene-change + session-stop each streamed live.
+        assertEquals(3, received.size)
+        assertTrue(received.any { it.contains("scene-change") })
+        // Stream success ACKs directly: nothing left for the bundle path.
+        val index = RoomEventIndex(database)
+        assertEquals(0, index.eventsByDispatchState(DispatchState.PENDING).size)
+        assertEquals(3, index.eventsByDispatchState(DispatchState.ACKED).size)
+    }
+
+    @Test
     fun rigStopFailureStillIngestsSessionStop() = runBlocking {
         val rig = object : PerceptionRig {
             override val detectorRunId = "fake-detector-v0@robolectric"

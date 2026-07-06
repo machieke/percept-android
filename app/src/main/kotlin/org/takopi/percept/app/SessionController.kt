@@ -32,6 +32,7 @@ import org.takopi.percept.dispatch.BundleUploader
 import org.takopi.percept.dispatch.DaRetentionCandidateCollector
 import org.takopi.percept.dispatch.FileRetentionEvictor
 import org.takopi.percept.dispatch.HttpBundleUploader
+import org.takopi.percept.dispatch.LiveEventStreamer
 import org.takopi.percept.dispatch.RetentionPlanner
 import java.net.URL
 import java.nio.file.Path
@@ -100,6 +101,7 @@ class SessionController(
     private var rig: PerceptionRig? = null
     private var activeTimeBase: SessionTimeBase? = null
     private var autoDispatchJob: Job? = null
+    private var liveStreamer: LiveEventStreamer? = null
     private var starting = false
     private var bundleSequence = 0
 
@@ -149,6 +151,17 @@ class SessionController(
             timeBase = timeBase,
             onEventIngested = ::onEventIngested,
         )
+        // Start streaming before session-start ingests so the root event
+        // reaches the memory server live too.
+        if (settings.endpointUrl.isNotBlank()) {
+            liveStreamer = LiveEventStreamer(
+                da = da,
+                index = index,
+                endpointUrl = settings.endpointUrl,
+                bearerToken = settings.bearerToken.ifBlank { null },
+                onError = ::reportRigError,
+            ).also { it.start(scope) }
+        }
         try {
             stateFlow.update {
                 it.copy(
@@ -166,6 +179,8 @@ class SessionController(
             synchronized(this) {
                 starting = false
             }
+            liveStreamer?.let { streamer -> scope.launch { streamer.stop() } }
+            liveStreamer = null
             throw t
         }
         synchronized(this) {
@@ -209,7 +224,11 @@ class SessionController(
             pair
         }
         val timeBase = synchronized(this) { activeTimeBase }
-        if (activeSession == null || activeRig == null) return
+        if (activeSession == null || activeRig == null) {
+            liveStreamer?.stop()
+            liveStreamer = null
+            return
+        }
         // The session-stop event must be written even when capture teardown
         // fails; fall back to zeroed counters and surface the rig error.
         val counters = try {
@@ -225,6 +244,9 @@ class SessionController(
             )
         }
         activeSession.stop(counters)
+        // session-stop has streamed by now; flush the queue and shut down.
+        liveStreamer?.stop()
+        liveStreamer = null
         stateFlow.update {
             it.copy(
                 running = false,
@@ -332,6 +354,15 @@ class SessionController(
             ?.absolutePath
 
     private fun onEventIngested(event: IngestedEvent) {
+        liveStreamer?.trySubmit(
+            LiveEventStreamer.StreamedEvent(
+                eventId = event.eventId,
+                pointerJson = org.takopi.percept.core.canonical.canonicalBytes(event.pointer)
+                    .toString(Charsets.UTF_8),
+                objectCids = listOf(event.eventCid, event.payloadCid) +
+                    event.pointer.cidList("outputArtifactIds"),
+            ),
+        )
         val entry = TickerEntry(
             valueKind = event.pointer.entryString("valueKind"),
             eventIdPrefix = event.eventId.take(EVENT_ID_PREFIX_CHARS),
@@ -361,6 +392,11 @@ class SessionController(
 
 private fun org.takopi.percept.core.canonical.CMap.entryString(key: String): String =
     (entries[key] as? org.takopi.percept.core.canonical.CString)?.value ?: "?"
+
+private fun org.takopi.percept.core.canonical.CMap.cidList(key: String): List<String> =
+    (entries[key] as? org.takopi.percept.core.canonical.CList)?.values
+        ?.mapNotNull { (it as? org.takopi.percept.core.canonical.CString)?.value }
+        .orEmpty()
 
 private fun org.takopi.percept.core.canonical.CMap.timeIso(): String =
     ((entries["time"] as? org.takopi.percept.core.canonical.CMap)

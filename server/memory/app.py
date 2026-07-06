@@ -156,6 +156,59 @@ def healthz() -> dict:
     return {"ok": True, "stats": index.state_stats(), "replayed": REPLAYED}
 
 
+@app.post("/events")
+async def post_event(request: Request, authorization: str | None = Header(None)) -> dict:
+    """Live ingest of a single event: the phone streams each event as it is
+    ingested locally, so reasoning sees the trace in near-real-time; bundles
+    remain the idempotent backfill for anything the stream drops."""
+    check_auth(authorization)
+    import base64
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty body")
+    try:
+        message = json.loads(body)
+        pointer = message["pointer"]
+        objects = {
+            digest: base64.b64decode(encoded)
+            for digest, encoded in message.get("objects", {}).items()
+        }
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"malformed event message: {exc}")
+
+    with ingest_lock:
+        try:
+            verify_pointer(pointer, objects)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        objects_dir = DATA_ROOT / "da" / "objects"
+        objects_dir.mkdir(parents=True, exist_ok=True)
+        for digest, data in objects.items():
+            target = objects_dir / digest
+            if not target.exists():
+                target.write_bytes(data)
+
+        ack = index.put_event(pointer)
+        duplicate = not ack.get("ok")
+        if not duplicate:
+            append_pointer(pointer)
+        transcription = None
+        if pointer.get("valueKind") == "audio-chunk" and pointer.get("outputArtifactIds"):
+            try:
+                transcription = transcribe_chunk(pointer)
+            except Exception as exc:  # noqa: BLE001 - ASR downtime must not fail ingest
+                transcription = {"chunk": pointer["eventId"], "error": str(exc)[:200]}
+
+    return {
+        "ok": True,
+        "eventId": pointer["eventId"],
+        "duplicate": duplicate,
+        "chunkTranscription": transcription,
+    }
+
+
 @app.put("/bundles/{bundle_id}")
 async def put_bundle(bundle_id: str, request: Request, authorization: str | None = Header(None)) -> dict:
     check_auth(authorization)
