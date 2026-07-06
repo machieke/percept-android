@@ -14,6 +14,7 @@ segments in the same causal trace.
 
 import json
 import os
+import queue
 import sys
 import threading
 import urllib.request
@@ -22,6 +23,8 @@ from io import BytesIO
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
+
+import enrich as enrichment
 
 sys.path.insert(0, os.environ.get("REFERENCE_PATH", "/opt/event-trace-memory"))
 
@@ -33,6 +36,8 @@ from event_trace_memory.ingestion import EventIngestor  # noqa: E402
 DATA_ROOT = Path(os.environ.get("DATA_ROOT", "/data"))
 ASR_URL = os.environ.get("ASR_URL", "http://host.docker.internal:8123")
 MEMORY_TOKEN = os.environ.get("MEMORY_TOKEN", "")
+ENRICH_ENABLED = os.environ.get("ENRICH_ENABLED", "1") == "1"
+MAX_CAPTIONS_PER_CHUNK = int(os.environ.get("MAX_CAPTIONS_PER_CHUNK", "4"))
 POINTER_LOG = DATA_ROOT / "pointers.jsonl"
 
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -153,7 +158,172 @@ def transcribe_chunk(pointer: dict) -> dict | None:
         created.append(ingested.event_id)
     if not created:
         return None
+    if ENRICH_ENABLED:
+        enrich_queue.put(chunk_event_id)
     return {"chunk": chunk_event_id, "asrEventIds": created}
+
+
+def _pointer(event_id: str) -> dict | None:
+    result = index.get_event(event_id)
+    return result.get("event") if result.get("ok") else None
+
+
+def _payload(pointer: dict) -> dict:
+    return json.loads(da.get_bytes(pointer["payloadCid"]))
+
+
+def enrich_chunk(chunk_event_id: str) -> None:
+    """Caption keyframes around one audio chunk and LLM-correct its archival
+    asr segments using that visual context. Runs on the enrichment worker;
+    only event creation holds the ingest lock — VLM/LLM latency never blocks
+    ingestion."""
+    chunk = _pointer(chunk_event_id)
+    if not chunk:
+        return
+    chunk_payload = _payload(chunk)
+    root = chunk["rootEventId"]
+    window = (chunk_payload["tStartNanos"] - 5_000_000_000, chunk_payload["tEndNanos"] + 5_000_000_000)
+
+    # Speech first: captioning on CPU costs minutes per keyframe, so only
+    # scenes near actual utterances are captioned, closest first, capped.
+    segment_windows = []
+    for segment_id in index.by_parent(chunk_event_id).get("eventIds", []):
+        segment = _pointer(segment_id)
+        if segment and segment["valueKind"] == "asr-segment":
+            sp = _payload(segment)
+            segment_windows.append((sp["tStartNanos"], sp["tEndNanos"]))
+    if not segment_windows:
+        return
+
+    def distance_to_speech(t_nanos: int) -> int:
+        return min(
+            0 if start <= t_nanos <= end else min(abs(t_nanos - start), abs(t_nanos - end))
+            for start, end in segment_windows
+        )
+
+    scene_candidates = []
+    captions: list[tuple[int, str, str]] = []  # (tNanos, text, captionEventId)
+    labels: list[str] = []
+    for event_id in index.by_root(root).get("eventIds", []):
+        pointer = _pointer(event_id)
+        if not pointer:
+            continue
+        if pointer["valueKind"] == "scene-change":
+            scene = _payload(pointer)
+            if not window[0] <= scene["tNanos"] <= window[1]:
+                continue
+            if distance_to_speech(scene["tNanos"]) > 10_000_000_000:
+                continue
+            scene_candidates.append((distance_to_speech(scene["tNanos"]), event_id, scene))
+        elif pointer["valueKind"] == "track-segment":
+            track = _payload(pointer)
+            if track["tEndNanos"] >= window[0] and track["tStartNanos"] <= window[1]:
+                labels.append(track["label"])
+
+    for _, event_id, scene in sorted(scene_candidates, key=lambda c: c[0])[:MAX_CAPTIONS_PER_CHUNK]:
+        pointer = _pointer(event_id)
+        existing = next(
+            (
+                child for child_id in index.by_parent(event_id).get("eventIds", [])
+                if (child := _pointer(child_id)) and child["valueKind"] == "scene-caption"
+            ),
+            None,
+        )
+        if existing:
+            captions.append((scene["tNanos"], _payload(existing)["text"], existing["eventId"]))
+            continue
+        if not pointer.get("outputArtifactIds"):
+            continue
+        text = enrichment.caption_keyframe(da.get_bytes(pointer["outputArtifactIds"][0]))
+        if not text:
+            continue
+        with ingest_lock:
+            ingested = ingestor.ingest_event(
+                raw_payload={
+                    "kind": "raw-payload",
+                    "schema": "perception-scene-caption-v0.1",
+                    "sessionId": scene["sessionId"],
+                    "text": text,
+                    "tNanos": scene["tNanos"],
+                    "observedAt": scene["observedAt"],
+                },
+                observed_at=scene["observedAt"],
+                actor_path=["server", "percept-memory", "vlm"],
+                channel_path=pointer["channelPath"],
+                value_kind="scene-caption",
+                preview=text[:160],
+                provenance={
+                    "source": "percept-memory-server",
+                    "observedBy": "percept-memory",
+                    "ingestionPipeline": "event-trace-v0",
+                    "extractionRunId": f"{enrichment.VLM_MODEL}@ollama",
+                },
+                parent_event_ids=[event_id],
+                root_event_id=root,
+                input_event_ids=[event_id],
+            )
+            append_pointer(ingested.pointer)
+        captions.append((scene["tNanos"], text, ingested.event_id))
+
+    for segment_id in index.by_parent(chunk_event_id).get("eventIds", []):
+        segment = _pointer(segment_id)
+        if not segment or segment["valueKind"] != "asr-segment":
+            continue
+        already_corrected = any(
+            (child := _pointer(child_id)) and child["valueKind"] == "asr-segment"
+            for child_id in index.by_parent(segment_id).get("eventIds", [])
+        )
+        if already_corrected:
+            continue
+        seg_payload = _payload(segment)
+        seg_window = (seg_payload["tStartNanos"] - 15_000_000_000, seg_payload["tEndNanos"] + 15_000_000_000)
+        nearby = [(t, c, cid) for (t, c, cid) in captions if seg_window[0] <= t <= seg_window[1]] or captions
+        corrected = enrichment.correct_transcript(
+            seg_payload["text"],
+            seg_payload.get("langHint", "auto"),
+            [c for (_, c, _) in nearby],
+            labels,
+        )
+        if not corrected:
+            continue
+        with ingest_lock:
+            ingested = ingestor.ingest_event(
+                raw_payload={
+                    **seg_payload,
+                    "text": corrected,
+                },
+                observed_at=seg_payload["observedAt"],
+                actor_path=["server", "percept-memory", "llm"],
+                channel_path=segment["channelPath"],
+                value_kind="asr-segment",
+                preview=corrected[:160],
+                provenance={
+                    "source": "percept-memory-server",
+                    "observedBy": "percept-memory",
+                    "ingestionPipeline": "event-trace-v0",
+                    "extractionRunId": f"{enrichment.LLM_MODEL}+visual-context@ollama",
+                },
+                parent_event_ids=[segment_id],
+                root_event_id=root,
+                input_event_ids=[segment_id, *[cid for (_, _, cid) in nearby]],
+            )
+            append_pointer(ingested.pointer)
+
+
+enrich_queue: "queue.Queue[str]" = queue.Queue()
+
+
+def enrich_worker() -> None:
+    while True:
+        chunk_event_id = enrich_queue.get()
+        try:
+            enrich_chunk(chunk_event_id)
+        except Exception as exc:  # noqa: BLE001 - enrichment is best-effort
+            print(f"enrichment failed for {chunk_event_id}: {exc}", flush=True)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=enrich_worker, daemon=True, name="enrich").start()
 
 
 app = FastAPI(title="percept-memory")
@@ -161,7 +331,25 @@ app = FastAPI(title="percept-memory")
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"ok": True, "stats": index.state_stats(), "replayed": REPLAYED}
+    return {
+        "ok": True,
+        "stats": index.state_stats(),
+        "replayed": REPLAYED,
+        "enrichQueue": enrich_queue.qsize(),
+    }
+
+
+@app.post("/enrich")
+def enrich_backfill(sessionId: str, authorization: str | None = Header(None)) -> dict:
+    """Queue enrichment for every audio chunk of a session (backfill)."""
+    check_auth(authorization)
+    queued = 0
+    for event_id in index.by_kind("audio-chunk").get("eventIds", []):
+        pointer = _pointer(event_id)
+        if pointer and _payload(pointer).get("sessionId") == sessionId:
+            enrich_queue.put(event_id)
+            queued += 1
+    return {"ok": True, "queued": queued}
 
 
 @app.post("/events")

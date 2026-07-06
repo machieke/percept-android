@@ -8,6 +8,10 @@ services:
       - percept-memory-data:/data
     environment:
       - ASR_URL=http://host.docker.internal:8123
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - VLM_MODEL=gemma3:4b
+      - LLM_MODEL=gemma3:4b
+      # - ENRICH_ENABLED=0         # disable VLM/LLM enrichment
       # - MEMORY_TOKEN=change-me   # uncomment to require a bearer token
     extra_hosts:
       - "host.docker.internal:host-gateway"

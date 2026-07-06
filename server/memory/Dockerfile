@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir \
     "uvicorn[standard]==0.34.0"
 
 WORKDIR /app
-COPY app.py /app/
+COPY app.py enrich.py /app/
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
