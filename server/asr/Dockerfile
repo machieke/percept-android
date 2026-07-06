@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl bzip2 \
+    && apt-get install -y --no-install-recommends ca-certificates curl bzip2 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \

@@ -73,18 +73,24 @@ async def transcribe(request: Request, sampleRate: int = 16000) -> dict:
 @app.post("/transcribe-file")
 async def transcribe_file(request: Request) -> dict:
     """Container audio (ogg/opus, flac, wav) — the format of the
-    audio-chunk artifacts that bundles carry for episodic memory."""
-    import io
-
-    import soundfile as sf
+    audio-chunk artifacts that bundles carry for episodic memory.
+    Decoded with ffmpeg: libsndfile rejects Android MediaMuxer's Ogg
+    page layout that ffmpeg handles fine."""
+    import subprocess
 
     body = await request.body()
     if not body:
         raise HTTPException(status_code=400, detail="empty body")
-    try:
-        samples, sample_rate = sf.read(io.BytesIO(body), dtype="float32")
-    except Exception as exc:  # noqa: BLE001 - report decode problems as 400s
-        raise HTTPException(status_code=400, detail=f"cannot decode audio: {exc}")
-    if samples.ndim > 1:
-        samples = samples.mean(axis=1)
-    return _decode(samples, sample_rate)
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-i", "pipe:0",
+            "-f", "f32le", "-ac", "1", "-ar", "16000", "pipe:1",
+        ],
+        input=body,
+        capture_output=True,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        detail = proc.stderr.decode("utf-8", "replace").strip()[:200] or "unknown"
+        raise HTTPException(status_code=400, detail=f"cannot decode audio: {detail}")
+    samples = np.frombuffer(proc.stdout, dtype=np.float32)
+    return _decode(samples, 16000)
