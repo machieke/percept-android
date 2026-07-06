@@ -70,12 +70,63 @@ async def transcribe(request: Request, sampleRate: int = 16000) -> dict:
     return _decode(samples, sampleRate)
 
 
+def _speech_regions(samples: "np.ndarray", sample_rate: int) -> list[tuple[int, int]]:
+    """Energy-VAD speech regions (sample offsets). Language identification
+    over a whole chunk gets diluted by silence and room noise — a real
+    session's 60 s Dutch chunk was transcribed as English — so archival
+    decoding runs per speech region, like the live windows that got the
+    language right."""
+    frame = int(0.03 * sample_rate)
+    n_frames = len(samples) // frame
+    if n_frames == 0:
+        return [(0, len(samples))]
+    frames = samples[: n_frames * frame].reshape(n_frames, frame)
+    rms = np.sqrt((frames * frames).mean(axis=1))
+    noise_floor = float(np.percentile(rms, 10))
+    threshold = max(noise_floor * 4.0, 0.004)
+    active = rms > threshold
+
+    raw: list[tuple[int, int]] = []
+    start = None
+    for i, is_active in enumerate(active):
+        if is_active and start is None:
+            start = i
+        elif not is_active and start is not None:
+            raw.append((start, i))
+            start = None
+    if start is not None:
+        raw.append((start, n_frames))
+    if not raw:
+        return []
+
+    pad = int(0.25 / 0.03)
+    gap = int(0.5 / 0.03)
+    merged: list[list[int]] = []
+    for s, e in raw:
+        s, e = max(0, s - pad), min(n_frames, e + pad)
+        if merged and s <= merged[-1][1] + gap:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+
+    max_frames = int(30 / 0.03)
+    regions: list[tuple[int, int]] = []
+    for s, e in merged:
+        if (e - s) * 0.03 < 0.4:
+            continue
+        while e - s > max_frames:
+            regions.append((s * frame, (s + max_frames) * frame))
+            s += max_frames
+        regions.append((s * frame, e * frame))
+    return regions
+
+
 @app.post("/transcribe-file")
 async def transcribe_file(request: Request) -> dict:
     """Container audio (ogg/opus, flac, wav) — the format of the
     audio-chunk artifacts that bundles carry for episodic memory.
-    Decoded with ffmpeg: libsndfile rejects Android MediaMuxer's Ogg
-    page layout that ffmpeg handles fine."""
+    Decoded with ffmpeg (libsndfile rejects Android MediaMuxer's Ogg),
+    then transcribed per speech region for stable language ID."""
     import subprocess
 
     body = await request.body()
@@ -93,4 +144,28 @@ async def transcribe_file(request: Request) -> dict:
         detail = proc.stderr.decode("utf-8", "replace").strip()[:200] or "unknown"
         raise HTTPException(status_code=400, detail=f"cannot decode audio: {detail}")
     samples = np.frombuffer(proc.stdout, dtype=np.float32)
-    return _decode(samples, 16000)
+
+    started = time.time()
+    segments = []
+    for region_start, region_end in _speech_regions(samples, 16000):
+        region = _decode(samples[region_start:region_end], 16000)
+        if not region["text"]:
+            continue
+        segments.append(
+            {
+                "text": region["text"],
+                "lang": region["lang"],
+                "startMs": region_start // 16,
+                "endMs": region_end // 16,
+            }
+        )
+    languages = [s["lang"] for s in segments if s["lang"] != "auto"]
+    return {
+        "text": " ".join(s["text"] for s in segments),
+        "lang": max(set(languages), key=languages.count) if languages else "auto",
+        "startMs": segments[0]["startMs"] if segments else 0,
+        "endMs": int(len(samples) * 1000 / 16000),
+        "decodeMs": int((time.time() - started) * 1000),
+        "segments": segments,
+        "modelRunId": MODEL_RUN_ID,
+    }

@@ -111,41 +111,49 @@ def transcribe_chunk(pointer: dict) -> dict | None:
     audio = da.get_bytes(artifact_cid)
 
     request = urllib.request.Request(f"{ASR_URL}/transcribe-file", data=audio)
-    with urllib.request.urlopen(request, timeout=120) as response:
+    with urllib.request.urlopen(request, timeout=300) as response:
         result = json.load(response)
-    text = result.get("text", "").strip()
-    if not text:
-        return None
+    segments = result.get("segments")
+    if segments is None:  # older ASR server: treat the whole chunk as one segment
+        segments = [result] if result.get("text", "").strip() else []
 
-    ingested = ingestor.ingest_event(
-        raw_payload={
-            "kind": "raw-payload",
-            "schema": "perception-asr-v0.1",
-            "sessionId": payload["sessionId"],
-            "text": text,
-            "langHint": result.get("lang", "auto"),
-            "tStartNanos": payload["tStartNanos"],
-            "tEndNanos": payload["tEndNanos"],
-            "avgLogProbMicro": 0,
-            "observedAt": payload["observedAt"],
-        },
-        observed_at=payload["observedAt"],
-        actor_path=["server", "percept-memory", "asr", "parakeet"],
-        channel_path=pointer["channelPath"],
-        value_kind="asr-segment",
-        preview=text[:160],
-        provenance={
-            "source": "percept-memory-server",
-            "observedBy": "percept-memory",
-            "ingestionPipeline": "event-trace-v0",
-            "extractionRunId": result.get("modelRunId", "unknown"),
-        },
-        parent_event_ids=[chunk_event_id],
-        root_event_id=pointer["rootEventId"],
-        input_event_ids=[chunk_event_id],
-    )
-    append_pointer(ingested.pointer)
-    return {"chunk": chunk_event_id, "asrEventId": ingested.event_id}
+    created = []
+    for segment in segments:
+        text = segment.get("text", "").strip()
+        if not text:
+            continue
+        ingested = ingestor.ingest_event(
+            raw_payload={
+                "kind": "raw-payload",
+                "schema": "perception-asr-v0.1",
+                "sessionId": payload["sessionId"],
+                "text": text,
+                "langHint": segment.get("lang", "auto"),
+                "tStartNanos": payload["tStartNanos"] + segment.get("startMs", 0) * 1_000_000,
+                "tEndNanos": payload["tStartNanos"] + segment.get("endMs", 0) * 1_000_000,
+                "avgLogProbMicro": 0,
+                "observedAt": payload["observedAt"],
+            },
+            observed_at=payload["observedAt"],
+            actor_path=["server", "percept-memory", "asr", "parakeet"],
+            channel_path=pointer["channelPath"],
+            value_kind="asr-segment",
+            preview=text[:160],
+            provenance={
+                "source": "percept-memory-server",
+                "observedBy": "percept-memory",
+                "ingestionPipeline": "event-trace-v0",
+                "extractionRunId": result.get("modelRunId", "unknown"),
+            },
+            parent_event_ids=[chunk_event_id],
+            root_event_id=pointer["rootEventId"],
+            input_event_ids=[chunk_event_id],
+        )
+        append_pointer(ingested.pointer)
+        created.append(ingested.event_id)
+    if not created:
+        return None
+    return {"chunk": chunk_event_id, "asrEventIds": created}
 
 
 app = FastAPI(title="percept-memory")
