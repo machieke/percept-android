@@ -70,6 +70,16 @@ def append_pointer(pointer: dict) -> None:
         log.write(canonical_json_bytes(pointer) + b"\n")
 
 
+def ingest_or_skip_duplicate(**kwargs):
+    """ingest_event + pointer-log append, returning None for duplicates so
+    re-runs of identical derivations are free (content addressing)."""
+    ingested = ingestor.ingest_event(**kwargs)
+    if not ingested.ack.get("ok"):
+        return None
+    append_pointer(ingested.pointer)
+    return ingested
+
+
 def check_auth(authorization: str | None) -> None:
     if not MEMORY_TOKEN:
         return
@@ -102,14 +112,17 @@ def verify_pointer(pointer: dict, objects: dict[str, bytes]) -> None:
             raise ValueError(f"{event_id}: object {cid} digest mismatch")
 
 
-def transcribe_chunk(pointer: dict) -> dict | None:
-    """Server-side archival transcript for one audio-chunk event."""
+def transcribe_chunk(pointer: dict, force: bool = False) -> dict | None:
+    """Server-side archival transcript for one audio-chunk event. With
+    force=True the existing-children check is skipped so an improved
+    pipeline can re-process legacy chunks — identical re-runs deduplicate
+    via content addressing, only genuinely different segments land."""
     chunk_event_id = pointer["eventId"]
-    existing_children = index.by_parent(chunk_event_id).get("eventIds", [])
-    for child_id in existing_children:
-        child = index.get_event(child_id)
-        if child.get("event", {}).get("valueKind") == "asr-segment":
-            return None  # already transcribed on a previous upload
+    if not force:
+        for child_id in index.by_parent(chunk_event_id).get("eventIds", []):
+            child = index.get_event(child_id)
+            if child.get("event", {}).get("valueKind") == "asr-segment":
+                return None  # already transcribed on a previous upload
 
     payload = json.loads(da.get_bytes(pointer["payloadCid"]))
     artifact_cid = pointer["outputArtifactIds"][0]
@@ -127,7 +140,7 @@ def transcribe_chunk(pointer: dict) -> dict | None:
         text = segment.get("text", "").strip()
         if not text:
             continue
-        ingested = ingestor.ingest_event(
+        ingested = ingest_or_skip_duplicate(
             raw_payload={
                 "kind": "raw-payload",
                 "schema": "perception-asr-v0.1",
@@ -154,7 +167,8 @@ def transcribe_chunk(pointer: dict) -> dict | None:
             root_event_id=pointer["rootEventId"],
             input_event_ids=[chunk_event_id],
         )
-        append_pointer(ingested.pointer)
+        if ingested is None:
+            continue
         created.append(ingested.event_id)
     if not created:
         return None
@@ -350,6 +364,27 @@ def enrich_backfill(sessionId: str, authorization: str | None = Header(None)) ->
             enrich_queue.put(event_id)
             queued += 1
     return {"ok": True, "queued": queued}
+
+
+@app.post("/retranscribe")
+def retranscribe_backfill(sessionId: str, authorization: str | None = Header(None)) -> dict:
+    """Re-run segmented archival ASR on a session's chunks (e.g. chunks
+    ingested before per-region transcription existed) and queue enrichment.
+    Identical segments deduplicate; only improved ones land."""
+    check_auth(authorization)
+    results = []
+    with ingest_lock:
+        for event_id in index.by_kind("audio-chunk").get("eventIds", []):
+            pointer = _pointer(event_id)
+            if not pointer or _payload(pointer).get("sessionId") != sessionId:
+                continue
+            try:
+                outcome = transcribe_chunk(pointer, force=True)
+            except Exception as exc:  # noqa: BLE001
+                outcome = {"chunk": event_id, "error": str(exc)[:200]}
+            if outcome:
+                results.append(outcome)
+    return {"ok": True, "chunks": results}
 
 
 @app.post("/events")
