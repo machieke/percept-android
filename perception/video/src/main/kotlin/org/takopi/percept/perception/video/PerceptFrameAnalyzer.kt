@@ -96,6 +96,7 @@ class PerceptFrameAnalyzer(
                     detections = detections,
                     histogram = histogram,
                     keyframeJpegProvider = { encodeJpeg(nv21, width, height) },
+                    sharpness = Sharpness.luminanceSharpness(nv21, width, height, rowStride = width),
                 ),
             )
         }

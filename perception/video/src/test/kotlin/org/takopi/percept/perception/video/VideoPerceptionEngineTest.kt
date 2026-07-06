@@ -29,12 +29,13 @@ class VideoPerceptionEngineTest {
         detections: List<VideoDetection>,
         histogram: LuminanceHistogram = flatHistogram,
         keyframe: () -> ByteArray = { "jpeg".toByteArray() },
-    ) = FrameObservation(tNanos, detections, histogram, keyframe)
+        sharpness: Int = 0,
+    ) = FrameObservation(tNanos, detections, histogram, keyframe, sharpness)
 
     @Test
     fun firstFrameEmitsSceneChangeWithKeyframe() {
         val sink = RecordingSink()
-        val engine = VideoPerceptionEngine(sink)
+        val engine = VideoPerceptionEngine(sink, keyframeSelectionFrames = 0)
         var keyframeEncodes = 0
 
         engine.onFrame(
@@ -59,7 +60,7 @@ class VideoPerceptionEngineTest {
     @Test
     fun keyframeEncoderRunsOnlyWhenGateFires() {
         val sink = RecordingSink()
-        val engine = VideoPerceptionEngine(sink)
+        val engine = VideoPerceptionEngine(sink, keyframeSelectionFrames = 0)
         var keyframeEncodes = 0
         val steady = listOf(detection("person", PixelBox(10, 10, 50, 90)))
 
@@ -87,6 +88,7 @@ class VideoPerceptionEngineTest {
         val engine = VideoPerceptionEngine(
             sink,
             gate = SceneChangeGate(minIntervalNanos = 0),
+            keyframeSelectionFrames = 0,
         )
         val steady = listOf(detection("person", PixelBox(10, 10, 50, 90)))
 
@@ -147,9 +149,64 @@ class VideoPerceptionEngineTest {
     }
 
     @Test
+    fun pendingScenePicksSharpestFrameInSelectionWindow() {
+        val sink = RecordingSink()
+        val engine = VideoPerceptionEngine(sink, keyframeSelectionFrames = 3)
+        val steady = listOf(detection("person", PixelBox(10, 10, 50, 90)))
+
+        engine.onFrame(frame(0, steady, keyframe = { byteArrayOf(0) }, sharpness = 10))
+        assertTrue(sink.ofType<PerceptionEvent.SceneChange>().isEmpty())
+        engine.onFrame(frame(100_000_000L, steady, keyframe = { byteArrayOf(1) }, sharpness = 50))
+        engine.onFrame(frame(200_000_000L, steady, keyframe = { byteArrayOf(2) }, sharpness = 30))
+        assertTrue(sink.ofType<PerceptionEvent.SceneChange>().isEmpty())
+        engine.onFrame(frame(300_000_000L, steady, keyframe = { byteArrayOf(3) }, sharpness = 20))
+
+        val scene = sink.ofType<PerceptionEvent.SceneChange>().single()
+        // Scene timing stays the gate moment; keyframe comes from the sharpest frame.
+        assertEquals(0L, scene.tNanos)
+        assertTrue(scene.keyframeJpeg.contentEquals(byteArrayOf(1)))
+    }
+
+    @Test
+    fun pendingSceneFlushesOnFinishWithBestSoFar() {
+        val sink = RecordingSink()
+        val engine = VideoPerceptionEngine(sink, keyframeSelectionFrames = 8)
+        val steady = listOf(detection("person", PixelBox(10, 10, 50, 90)))
+
+        engine.onFrame(frame(0, steady, keyframe = { byteArrayOf(0) }, sharpness = 5))
+        engine.onFrame(frame(100_000_000L, steady, keyframe = { byteArrayOf(1) }, sharpness = 9))
+        engine.finish()
+
+        val scene = sink.ofType<PerceptionEvent.SceneChange>().single()
+        assertTrue(scene.keyframeJpeg.contentEquals(byteArrayOf(1)))
+    }
+
+    @Test
+    fun newSceneFlushesThePendingOneFirst() {
+        val sink = RecordingSink()
+        val engine = VideoPerceptionEngine(
+            sink,
+            gate = SceneChangeGate(signatureHoldFrames = 1, minIntervalNanos = 0),
+            keyframeSelectionFrames = 8,
+        )
+        val person = listOf(detection("person", PixelBox(10, 10, 50, 90)))
+
+        engine.onFrame(frame(0, person, keyframe = { byteArrayOf(0) }, sharpness = 7))
+        // Detection set changes: second scene fires while the first is pending.
+        engine.onFrame(frame(100_000_000L, emptyList(), keyframe = { byteArrayOf(1) }, sharpness = 3))
+        engine.finish()
+
+        val scenes = sink.ofType<PerceptionEvent.SceneChange>()
+        assertEquals(2, scenes.size)
+        assertEquals(0, scenes[0].sceneIndex)
+        assertTrue(scenes[0].keyframeJpeg.contentEquals(byteArrayOf(0)))
+        assertTrue(scenes[1].keyframeJpeg.contentEquals(byteArrayOf(1)))
+    }
+
+    @Test
     fun frameArrivingAfterFinishIsSilentlyIgnored() {
         val sink = RecordingSink()
-        val engine = VideoPerceptionEngine(sink)
+        val engine = VideoPerceptionEngine(sink, keyframeSelectionFrames = 0)
         engine.onFrame(frame(0, listOf(detection("person", PixelBox(10, 10, 50, 90)))))
         val counters = engine.finish()
 
