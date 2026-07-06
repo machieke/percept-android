@@ -26,19 +26,31 @@ CAPTION_PROMPT = (
     "you cannot read clearly. Reply with only that sentence."
 )
 
-CORRECT_PROMPT = """A speech recognizer transcribed a short utterance and may have misheard \
-words as similar-sounding ones.
+CORRECT_PROMPT = """You fix speech-recognition errors. The recognizer heard real sounds and wrote \
+the closest words it knew, so any correction MUST sound nearly the same as what \
+was written: similar syllable count, similar consonants and vowels, in the same \
+language. The visual scene may only help you choose BETWEEN sound-alike \
+candidates — it is never a reason to substitute a differently-sounding word.
 
 Utterance language: {lang}
-Transcript: "{text}"
+ASR transcript: "{text}"
 
 What the camera saw at that moment:
 {context}
 
-If a transcribed word is likely a mishearing of a similar-sounding word that fits \
-the visual context better, output the corrected transcript. Change as little as \
-possible; keep the language of the transcript. If nothing needs correction, output \
-the transcript unchanged. Output ONLY the transcript text, nothing else."""
+Rules:
+- Replace a word only if a word exists that sounds almost identical AND fits the \
+scene better (example of a good fix: a garbled non-word replaced by a real word \
+with nearly the same sounds).
+- Replacing a word with the name of a visible object that does NOT sound like the \
+transcribed word is wrong. When the scene shows several things, prefer the \
+candidate that sounds closest, not the one most visible.
+- Keep everything else, including punctuation, identical. If no sound-alike \
+improvement exists, keep the transcript unchanged.
+
+Answer with exactly two lines:
+Reasoning: <one short sentence>
+Corrected: <the final transcript>"""
 
 
 def _generate(model: str, prompt: str, images: list[str] | None = None, timeout: int = 900) -> str:
@@ -63,18 +75,77 @@ def caption_keyframe(jpeg: bytes) -> str:
     return _generate(VLM_MODEL, CAPTION_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
 
 
+def _replaced_word_pairs(original: str, corrected: str) -> list[tuple[str, str]]:
+    import difflib
+
+    a = original.lower().split()
+    b = corrected.lower().split()
+    pairs: list[tuple[str, str]] = []
+    for op, a0, a1, b0, b1 in difflib.SequenceMatcher(None, a, b).get_opcodes():
+        if op == "replace":
+            pairs.append((" ".join(a[a0:a1]), " ".join(b[b0:b1])))
+        elif op in ("insert", "delete"):
+            pairs.append((" ".join(a[a0:a1]), " ".join(b[b0:b1])))
+    return pairs
+
+
+_PUNCT = str.maketrans("", "", ".,;:!?\"'")
+
+
+def _phonetic_norm(word: str) -> str:
+    """Light sound-alike normalization (Dutch final devoicing d/t, s/z, f/v;
+    hard c/k; ch/sh) plus doubled-letter collapse, so 'mostert'≈'mosterd'
+    and 'choose'≈'shoes' score as the near-homophones they are."""
+    word = word.lower().translate(_PUNCT)
+    for a, b in (("ch", "sh"), ("c", "k"), ("z", "s"), ("v", "f"), ("d", "t"), ("y", "i")):
+        word = word.replace(a, b)
+    collapsed = []
+    for ch in word:
+        if not collapsed or collapsed[-1] != ch:
+            collapsed.append(ch)
+    return "".join(collapsed)
+
+
+def _acoustically_plausible(original: str, corrected: str, min_ratio: float = 0.65) -> bool:
+    """Each replaced span must sound like what the recognizer heard. Measured
+    on real cases (max of raw and phonetically-normalized similarity): good
+    fixes score 0.71-1.00, scene-plausible-but-wrong swaps <= 0.55
+    ("kalslost"->"kaas" was such a failure)."""
+    import difflib
+
+    for heard, proposed in _replaced_word_pairs(original, corrected):
+        if not heard or not proposed:
+            return False  # insertions/deletions are rewrites, not corrections
+        raw = difflib.SequenceMatcher(
+            None, heard.translate(_PUNCT), proposed.translate(_PUNCT)
+        ).ratio()
+        normalized = difflib.SequenceMatcher(
+            None, _phonetic_norm(heard), _phonetic_norm(proposed)
+        ).ratio()
+        if max(raw, normalized) < min_ratio:
+            return False
+    return True
+
+
 def correct_transcript(text: str, lang: str, captions: list[str], labels: list[str]) -> str | None:
-    """Returns the corrected transcript, or None when unchanged."""
+    """Returns the corrected transcript, or None when unchanged/implausible."""
     context_lines = [f"- {caption}" for caption in captions]
     if labels:
         context_lines.append(f"- detected objects: {', '.join(sorted(set(labels)))}")
     if not context_lines:
         return None
     prompt = CORRECT_PROMPT.format(lang=lang, text=text, context="\n".join(context_lines))
-    corrected = _generate(LLM_MODEL, prompt).strip().strip('"')
+    response = _generate(LLM_MODEL, prompt)
+    corrected = None
+    for line in response.splitlines():
+        if line.strip().lower().startswith("corrected:"):
+            corrected = line.split(":", 1)[1].strip().strip('"')
     if not corrected or corrected.lower() == text.lower():
         return None
-    # Guard against the model rewriting rather than correcting.
+    # Guards: no wholesale rewrites, and every replaced word must plausibly
+    # sound like what the recognizer heard.
     if len(corrected) > len(text) * 2 + 20:
+        return None
+    if not _acoustically_plausible(text, corrected):
         return None
     return corrected
