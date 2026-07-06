@@ -2,19 +2,19 @@ services:
   percept-memory:
     build: .
     container_name: percept-memory
-    ports:
-      - "8124:8000"
+    # Host networking: ollama binds to 127.0.0.1 only, so the enrichment
+    # worker must share the host loopback (also reaches percept-asr:8123).
+    network_mode: host
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8124"]
     volumes:
       - percept-memory-data:/data
     environment:
-      - ASR_URL=http://host.docker.internal:8123
-      - OLLAMA_URL=http://host.docker.internal:11434
+      - ASR_URL=http://127.0.0.1:8123
+      - OLLAMA_URL=http://127.0.0.1:11434
       - VLM_MODEL=gemma3:4b
       - LLM_MODEL=gemma3:4b
       # - ENRICH_ENABLED=0         # disable VLM/LLM enrichment
       # - MEMORY_TOKEN=change-me   # uncomment to require a bearer token
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
 volumes:

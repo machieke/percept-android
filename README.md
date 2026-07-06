@@ -1,12 +1,16 @@
 # percept-android
 
-On-device perception → event-trace ingestion for Android. The app runs local
-computer-vision and audio models over live camera and microphone input,
-aggregates what they see and hear into a small stream of semantic events, and
-records those events as content-addressed, cryptographically verifiable
-`event-trace-v0.1` envelopes that sync to a server as idempotent bundles.
+A phone that perceives, and a server that remembers.
 
-Everything stays on the device until you explicitly export or upload it.
+The Android app runs local perception over live camera and microphone input —
+object tracking, scene detection, audio tagging, speech recognition — and
+records everything as content-addressed, cryptographically verifiable
+`event-trace-v0.1` events. Events stream to a self-hosted memory server
+within a second of happening; the full session audio follows as compressed
+artifacts. The server accumulates the trace continuously, transcribes the
+archival audio at server-model quality, and enriches it with VLM scene
+captions and context-corrected transcripts. The phone is a lean buffer: once
+the server acknowledges an event, the phone sheds its artifacts.
 
 ## Why it matters
 
@@ -14,107 +18,114 @@ Everything stays on the device until you explicitly export or upload it.
 serialized as canonical JSON and addressed by its sha256 (`eventId`,
 `eventCid`, `payloadCid`). The Kotlin implementation reproduces the Python
 reference implementation ([`machieke/event-trace-memory`](https://github.com/machieke/event-trace-memory))
-exactly — same bytes, same digests — which is enforced by golden-vector tests
-and CI harnesses that re-verify every exported bundle with the reference code.
-Cross-implementation CID parity is the project's prime directive: if a design
-choice ever trades convenience against byte-exact parity, parity wins. One
-consequence: **no floats anywhere** — confidences are integer per-mille,
-timestamps are integer nanoseconds, and the serializer throws on
-`Float`/`Double` so violations fail loudly in tests instead of silently
-diverging between JVM and Python.
+exactly — same bytes, same digests — enforced by golden-vector tests and
+harnesses that re-verify every exported bundle with the reference code. The
+memory server verifies each event against its content address before
+accepting it. Cross-implementation CID parity is the prime directive; one
+consequence is **no floats anywhere** — confidences are integer per-mille,
+timestamps integer nanoseconds, and the serializer throws on `Float`/`Double`.
 
 **Events, not frames.** The pipeline never emits per-frame records. Object
 tracks, audio-tag run-lengths, ASR segments, and scene changes are the atomic
-granularity (≈0.5 events/s in a typical scene), each carrying monotonic
-nanosecond timing and causal parent links back to the session root. The result
-is a compact, queryable, causally-structured record of what a device perceived
-— suitable for downstream memory systems, retrieval, and causal analysis —
-rather than a firehose of detections.
+granularity, each carrying monotonic nanosecond timing and causal parent
+links back to the session root. Because all modalities share one timeline in
+one causal graph, cross-modal queries are lookups — "what was visible while
+this was said" needs no fusion step. The enrichment layer exploits exactly
+that: some transcription errors are acoustically unfixable (Dutch final
+devoicing makes *mosterd* sound like *mostert*), and only temporally-aligned
+visual context can recover them.
 
-**Local-first and private by construction.** Recording only runs behind a
-visible camera+microphone foreground-service notification. Events, keyframes,
-and transcripts live in an on-device content-addressed store and a Room index;
-they leave the device only via explicit export (a zip you can `adb pull`) or an
-upload endpoint you configure. Bundles are idempotent by construction — every
-object is content-addressed, so the server dedupes on digest and retries are
-always safe.
+**Self-hosted end to end.** Audio and transcripts leave the device only to
+infrastructure you run: the ASR and memory services are docker compose
+deployments, models are sha256-pinned downloads, and the recommended
+transport is your own WireGuard tailnet (works with headscale), so the phone
+reaches the server from any network — Wi-Fi to 5G mid-sentence — without
+anything becoming public. Recording only ever runs behind a visible
+camera+microphone foreground-service notification.
 
 ## How it works
 
 ```
-camera ──► CameraX 640×480 ──► EfficientDet-Lite0 (MediaPipe) ──► IoU tracker ──► track-segment
-                          └──► luminance histogram ─────────────► scene gate  ──► scene-change (+JPEG keyframe)
+PHONE (lean buffer)
+camera ─► CameraX ─► EfficientDet (MediaPipe, GPU→CPU probe) ─► IoU tracker ─► track-segment
+                └──► luminance histogram ─► debounced scene gate ─► scene-change (+JPEG keyframe)
+mic ────► AudioRecord ─► ring buffer ─┬► VAD ─► ASR windows ──────► asr-segment (live)
+                                      ├► YAMNet (TFLite) ─► RLE ──► audio-tag-segment
+                                      └► 60 s chunks ─► Opus ─────► audio-chunk (full session audio)
 
-mic ────► AudioRecord 16 kHz ─► ring buffer ─┬► VAD ─► whisper.cpp (5 s / 1 s overlap) ─► asr-segment
-                                             └► YAMNet (0.975 s / 0.5 s hop) ─► run-length ─► audio-tag-segment
+all events ─► canonical envelopes ─► content-addressed DA store + Room index
+          ─► LIVE: POST /events to the memory server (sub-second, ACK ⇒ evict)
+          ─► BACKFILL: idempotent zip bundles (in-session, at stop, hourly sweeper)
 
-all events ──► bounded channel ──► single ingestion coroutine ──► canonical JSON envelope
-           ──► content-addressed DA store (objects + manifests) + Room pointer index
-           ──► bundle exporter (zip: objects/, manifests/, pointers.jsonl)
-           ──► local export  or  WorkManager upload (charging + unmetered, exponential backoff)
+SERVER (accumulating memory)                      SERVER (ASR)
+percept-memory :8124                              percept-asr :8123
+  verify CIDs ─► FileDA + pointer log               parakeet-tdt-0.6b-v3 int8 (sherpa-onnx)
+  audio-chunk ─► archival ASR per speech region     RTF ~0.05 on CPU, multilingual
+  keyframes ──► VLM captions (ollama)               /transcribe (live PCM windows)
+  transcripts ─► LLM correction w/ visual context   /transcribe-file (Opus chunks)
 ```
 
-Session lifecycle is bracketed by `session-start` (which anchors monotonic
-time to wall-clock time) and `session-stop` (which records counters: frames
-processed, events emitted, drops, ring-buffer overruns, thermal throttling).
-Envelope timestamps are second-resolution and schema-pure; all sub-second
-ordering lives in payload `tStartNanos`/`tEndNanos` fields.
+Live speech recognition is remote-first: the phone POSTs VAD-gated PCM
+windows to the ASR server (~250 ms per 5 s window) and falls back per-window
+to an on-device Zipformer (sherpa-onnx) — and whisper.cpp as last resort —
+when the network drops. Every model, local or remote, is pinned by sha256 and
+recorded per-event as an `extractionRunId`, so provenance survives any swap.
+Server-side derived events (archival `asr-segment`s, `scene-caption`s,
+corrected transcripts) are causally parented to the events they derive from;
+competing interpretations coexist in the trace with honest provenance.
 
-## Modules
+## Layout
 
-| Module | Contents |
+| Component | Contents |
 |---|---|
-| `:core:canonical` | Pure JVM. Canonical JSON serializer (byte-compatible with Python `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)`), sha256/CID helpers, path/time prefix keys. |
-| `:core:da` | Pure JVM. Content-addressed file store (`objects/<sha256>`, `manifests/<sha256>.json`), idempotent puts, digest-verified gets. |
-| `:core:trace` | Pure JVM. Envelope builder, ingestion funnel (`PerceptionSession`), event taxonomy, session time base, model-provenance registry. |
-| `:core:index` | Room database mirroring `event-pointer-v0.1` rows with time/actor/channel prefix-key tables and dispatch state. |
-| `:perception:video` | Detector interface + MediaPipe adapter, IoU tracker, scene-change gate, thermal frame governor, CameraX analyzer. |
-| `:perception:audio` | Ring buffer, energy VAD, ASR windowing, tag run-length encoder, YAMNet adapter, whisper.cpp JNI boundary, AudioRecord pipeline. |
-| `:dispatch` | Bundle exporter/uploader, retention planner, WorkManager upload worker. |
-| `:app` | Foreground service, session controller, Compose UI (start/stop, live event ticker, stats, export/upload, settings). |
-
-The `:core:*` modules are pure JVM by design: all parity-critical code runs on
-the host in CI without an emulator or device.
+| `:core:canonical` | Pure JVM. Canonical JSON serializer (byte-compatible with the Python reference), sha256/CID helpers, path/time prefix keys. |
+| `:core:da` | Pure JVM. Content-addressed file store, idempotent puts, digest-verified gets. |
+| `:core:trace` | Pure JVM. Envelope builder, ingestion funnel, event taxonomy, session time base, model registry. |
+| `:core:index` | Room database mirroring `event-pointer-v0.1` rows with prefix-key tables and dispatch state. |
+| `:perception:video` | Detector interface + MediaPipe adapter, IoU tracker, debounced scene gate, thermal governor, CameraX analyzer. |
+| `:perception:audio` | Ring buffer, VAD, ASR window/lag-skip engine, tag RLE, chunk recorder, Opus encoder, remote/Zipformer/whisper ASR adapters. |
+| `:dispatch` | Bundle exporter/uploader, live event streamer, WorkManager workers, post-ACK retention. |
+| `:app` | Foreground service, session controller, Compose UI (ticker, stats, endpoints). |
+| `server/asr` | Docker compose: Parakeet via sherpa-onnx; PCM window + compressed-file transcription with speech-region segmentation. |
+| `server/memory` | Docker compose: bundle/event ingest with CID verification, persistent DA + replayed index, archival transcription, VLM/LLM enrichment (ollama). |
 
 ## Building and verifying
 
-```bash
-./gradlew test assembleDebug        # full host test suite + debug APK
-python3 scripts/run_parity_harness.py        # 50-event fixture, verified by the Python reference
-python3 scripts/run_synthetic_m6_harness.py  # synthetic 5-minute multimodal session bundle
-python3 scripts/run_live_engine_harness.py   # real engines + fake models, end to end
-```
-
-Each harness exports a bundle from the Kotlin side and then uses the Python
-reference implementation to re-verify every CID, re-canonicalize every
-envelope, validate schemas, and load the pointers into the reference index.
-`reference/event-trace-memory` is cloned automatically on first run.
-
-Model assets (EfficientDet-Lite0 int8, YAMNet, whisper tiny q8_0) are fetched
-at build time by `:app:downloadModels` with pinned sha256 hashes — they are
-never committed. Each model's hash is also registered in
-`ExtractionRuns` (`:core:trace`), so every event's `extractionRunId` maps to
-exact model bytes.
-
-### whisper.cpp native build (optional)
-
-ASR uses whisper.cpp via JNI. The native build is opt-in so host tests and CI
-never need the NDK:
+Host-side (no device or emulator needed):
 
 ```bash
-git submodule update --init third_party/whisper.cpp
-./gradlew :app:assembleDebug -PwhisperNative   # packages libwhisper_percept.so (arm64-v8a)
+./gradlew test assembleDebug             # full test suite + APK
+python3 scripts/run_parity_harness.py    # 50-event fixture vs Python reference
+python3 scripts/run_synthetic_m6_harness.py
+python3 scripts/run_live_engine_harness.py   # real engines end to end, reference-verified
 ```
 
-Without the flag (or on devices where the library is absent) the app runs with
-ASR disabled and everything else intact.
+Servers (any docker host; models are downloaded and sha256-verified on first start):
+
+```bash
+(cd server/asr && docker compose up -d)      # :8123
+(cd server/memory && docker compose up -d)   # :8124, host networking
+```
+
+Enrichment needs an [ollama](https://ollama.com) instance with a vision model
+(`ollama pull gemma3:4b` by default; configure via `VLM_MODEL`/`LLM_MODEL`).
+
+On the phone, set **Remote ASR URL** to the ASR server and **Sync endpoint
+URL** to the memory server (tailnet addresses recommended). Everything else
+is automatic: live streaming, periodic bundle backfill, and post-ACK
+eviction.
+
+Device builds bundle whisper.cpp for arm64 with `-PwhisperNative` (requires
+the `third_party/whisper.cpp` submodule and NDK 26); without the flag no NDK
+is needed anywhere.
 
 ## Status
 
-Code-complete and host-verified through the M6 milestone of the
-[implementation plan](percept-android-implementation-plan.md). What remains
-requires physical hardware (target: Moto G84 5G): sustained-fps and thermal
-soak benchmarks, whisper realtime-factor measurement, GPU-delegate behavior on
-the Adreno 619 driver, the camera timestamp clock-base assertion against real
-HAL output, and the final acceptance test of a phone-produced bundle ingested
-by the reference implementation.
+Functionally complete end to end, validated with real device sessions
+(Moto G84 5G): phone-produced bundles pass full reference verification, live
+events reach the server sub-second over a roaming tailnet, archival Dutch
+audio transcribes with per-utterance timing, and enrichment produces scene
+captions and context-corrected transcripts from real keyframes. Remaining
+work per the [implementation plan](percept-android-implementation-plan.md):
+formal performance/thermal soak benchmarks on device, and enrichment quality
+tuning (stronger corrector models, sharper keyframe selection).
