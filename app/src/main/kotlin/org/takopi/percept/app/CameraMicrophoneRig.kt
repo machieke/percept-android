@@ -59,6 +59,7 @@ class CameraMicrophoneRig(
     private var cameraProvider: ProcessCameraProvider? = null
     private var analysisExecutor: ExecutorService? = null
     private var analyzer: PerceptFrameAnalyzer? = null
+    private var locationTracker: LocationTracker? = null
     private var timeBase: SessionTimeBase? = null
 
     override fun start(sink: TraceSink, timeBase: SessionTimeBase) {
@@ -113,9 +114,16 @@ class CameraMicrophoneRig(
             engine = audioEngine,
             chunkRecorder = chunkRecorder,
         ).also(AudioCapturePipeline::start)
+
+        locationTracker = LocationTracker(context, sink, timeBase).also { tracker ->
+            if (!tracker.start()) {
+                onError?.invoke("location unavailable (permission or providers); no location-fix events")
+            }
+        }
     }
 
     override fun stop(): PerceptionRunCounters {
+        locationTracker?.stop()
         // Called from a background coroutine; CameraX requires unbinding on
         // the main thread.
         cameraProvider?.let { provider ->

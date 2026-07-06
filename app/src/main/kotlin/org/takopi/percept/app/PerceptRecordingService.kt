@@ -1,13 +1,16 @@
 package org.takopi.percept.app
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 
 /**
@@ -28,12 +31,19 @@ class PerceptRecordingService : LifecycleService() {
     private fun startRecording() {
         val controller = PerceptRuntime.controller(this)
         if (controller.state.value.running) return
-        startForeground(
-            NOTIFICATION_ID,
-            buildNotification(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-        )
+        // The location FGS type may only be claimed when the runtime
+        // permission is actually granted (Android 14 throws otherwise).
+        var serviceTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        val hasLocation = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_COARSE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasLocation) {
+            serviceTypes = serviceTypes or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+        }
+        startForeground(NOTIFICATION_ID, buildNotification(), serviceTypes)
         // Factory runs on the controller's background scope: rig construction
         // loads models and stages the whisper weights, which must not touch
         // the main thread.

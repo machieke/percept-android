@@ -69,6 +69,28 @@ sealed interface PerceptionEvent {
     }
 
     /**
+     * A GPS/network location fix. Coordinates are integers per the no-float
+     * rule: degrees ×1e7 (~1 cm resolution), accuracy in centimeters.
+     * Low-rate by design — the capture side gates on movement/time.
+     */
+    data class LocationFix(
+        val tNanos: Long,
+        val latE7: Long,
+        val lonE7: Long,
+        val accuracyCm: Long,
+        val altitudeCm: Long?,
+        val provider: String,
+    ) : PerceptionEvent {
+        init {
+            require(tNanos >= 0) { "tNanos must be non-negative" }
+            require(latE7 in -900_000_000..900_000_000) { "latE7 out of range" }
+            require(lonE7 in -1_800_000_000..1_800_000_000) { "lonE7 out of range" }
+            require(accuracyCm >= 0) { "accuracyCm must be non-negative" }
+            require(provider.isNotBlank()) { "provider must not be blank" }
+        }
+    }
+
+    /**
      * A compressed slice of the session's full audio, stored as a raw DA
      * artifact (like keyframes) so bundles carry the complete episodic
      * record for server-side processing.

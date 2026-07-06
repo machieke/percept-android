@@ -225,6 +225,33 @@ class PerceptionSession(
                 provenance = provenance(config.audioTaggerRunId),
             )
 
+            is PerceptionEvent.LocationFix -> ingestor.ingestEvent(
+                rawPayload = run {
+                    val entries = linkedMapOf<String, org.takopi.percept.core.canonical.CanonicalValue>(
+                        "kind" to CString("raw-payload"),
+                        "schema" to CString("perception-location-v0.1"),
+                        "sessionId" to CString(config.sessionId),
+                        "tNanos" to CLong(event.tNanos),
+                        "latE7" to CLong(event.latE7),
+                        "lonE7" to CLong(event.lonE7),
+                        "accuracyCm" to CLong(event.accuracyCm),
+                        "provider" to CString(event.provider),
+                        "observedAt" to CString(timeBase.observedAtIso(event.tNanos)),
+                    )
+                    // Optional key: absent entirely when unknown (presence
+                    // changes canonical bytes).
+                    event.altitudeCm?.let { entries["altitudeCm"] = CLong(it) }
+                    org.takopi.percept.core.canonical.CMap(entries)
+                },
+                observedAt = timeBase.observedAtIso(event.tNanos),
+                actorPath = listOf("device", config.deviceId, "location", "0"),
+                channelPath = channelPath("location"),
+                valueKind = "location-fix",
+                parentEventIds = listOf(root),
+                rootEventId = root,
+                provenance = provenance(null),
+            )
+
             is PerceptionEvent.AudioChunk -> {
                 val audioCid = da.putBytes(event.encoded, codec = "raw")
                 ingestor.ingestEvent(

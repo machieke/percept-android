@@ -67,7 +67,7 @@ class MainActivity : ComponentActivity() {
                     } else {
                         PermissionScreen(
                             onRequestPermissions = {
-                                permissionLauncher.launch(requiredPermissions())
+                                permissionLauncher.launch(requestedPermissions())
                             },
                         )
                     }
@@ -75,7 +75,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         if (!permissionsGranted) {
-            permissionLauncher.launch(requiredPermissions())
+            permissionLauncher.launch(requestedPermissions())
         }
     }
 
@@ -91,6 +91,10 @@ class MainActivity : ComponentActivity() {
             add(Manifest.permission.POST_NOTIFICATIONS)
         }
     }.toTypedArray()
+
+    /** Location is requested but optional: sessions run without it. */
+    private fun requestedPermissions(): Array<String> =
+        requiredPermissions() + arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
 }
 
 @Composable

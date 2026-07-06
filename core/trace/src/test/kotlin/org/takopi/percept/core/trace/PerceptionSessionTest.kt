@@ -192,6 +192,61 @@ class PerceptionSessionTest {
     }
 
     @Test
+    fun locationFixIngestsWithIntegerCoordinates() = runTest {
+        val da = MemoryDA()
+        val ingested = mutableListOf<IngestedEvent>()
+        val session = PerceptionSession(
+            da = da,
+            index = MemoryEventIndex(),
+            config = config(),
+            timeBase = SessionTimeBase(0, anchorEpochMillis),
+            onEventIngested = ingested::add,
+        )
+        val root = session.start(this)
+        session.trySubmit(
+            PerceptionEvent.LocationFix(
+                tNanos = 12_000_000_000L,
+                latE7 = 508_512_345L,
+                lonE7 = 43_512_345L,
+                accuracyCm = 850,
+                altitudeCm = 4_200,
+                provider = "gps",
+            ),
+        )
+        session.trySubmit(
+            PerceptionEvent.LocationFix(
+                tNanos = 80_000_000_000L,
+                latE7 = 508_512_400L,
+                lonE7 = 43_512_400L,
+                accuracyCm = 900,
+                altitudeCm = null,
+                provider = "network",
+            ),
+        )
+        advanceUntilIdle()
+        session.stop(counters(tEndNanos = 90_000_000_000L))
+
+        val fixes = ingested.filter { it.pointer.requireString("valueKind") == "location-fix" }
+        assertEquals(2, fixes.size)
+        assertEquals(listOf(root.eventId), fixes[0].pointer.stringListOf("parentEventIds"))
+        assertEquals(
+            listOf("perception", "sess-funnel", "location"),
+            fixes[0].pointer.stringListOf("channelPath"),
+        )
+        assertEquals(
+            listOf("device", "moto-g84-5g", "location", "0"),
+            fixes[0].pointer.stringListOf("actorPath"),
+        )
+        val withAltitude = da.getBytes(fixes[0].payloadCid).toString(StandardCharsets.UTF_8)
+        assertTrue(withAltitude.contains("\"latE7\":508512345"))
+        assertTrue(withAltitude.contains("\"accuracyCm\":850"))
+        assertTrue(withAltitude.contains("\"altitudeCm\":4200"))
+        // Optional key entirely absent when unknown (§0.3 presence rule).
+        val withoutAltitude = da.getBytes(fixes[1].payloadCid).toString(StandardCharsets.UTF_8)
+        assertFalse(withoutAltitude.contains("altitudeCm"))
+    }
+
+    @Test
     fun trackSegmentBeforeAnySceneParentsToRootOnly() = runTest {
         val ingested = mutableListOf<IngestedEvent>()
         val session = PerceptionSession(
