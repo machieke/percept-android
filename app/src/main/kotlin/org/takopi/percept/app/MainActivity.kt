@@ -76,8 +76,19 @@ class MainActivity : ComponentActivity() {
         }
         if (!permissionsGranted) {
             permissionLauncher.launch(requestedPermissions())
+        } else if (!hasLocationPermission()) {
+            // Upgrades: required permissions were granted by an earlier
+            // install, so the launcher above never fires — ask for the
+            // optional location permission on its own.
+            permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION))
         }
     }
+
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
 
     private fun hasRequiredPermissions(): Boolean =
         requiredPermissions().all { permission ->
