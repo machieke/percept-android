@@ -275,6 +275,68 @@ class PerceptionSessionTest {
     }
 
     @Test
+    fun environmentEventsIngestOnTheirChannels() = runTest {
+        val da = MemoryDA()
+        val ingested = mutableListOf<IngestedEvent>()
+        val session = PerceptionSession(
+            da = da,
+            index = MemoryEventIndex(),
+            config = config(),
+            timeBase = SessionTimeBase(0, anchorEpochMillis),
+            onEventIngested = ingested::add,
+        )
+        session.start(this)
+        session.trySubmit(PerceptionEvent.AmbientLight(tNanos = 1_000_000_000L, luxMilli = 412_000))
+        session.trySubmit(PerceptionEvent.Proximity(tNanos = 2_000_000_000L, state = "near"))
+        session.trySubmit(
+            PerceptionEvent.NetworkContext(
+                tNanos = 3_000_000_000L,
+                transport = "wifi",
+                ssid = "HomeBase",
+                metered = false,
+            ),
+        )
+        session.trySubmit(
+            PerceptionEvent.NetworkContext(
+                tNanos = 4_000_000_000L,
+                transport = "cellular",
+                ssid = null,
+                metered = true,
+            ),
+        )
+        session.trySubmit(
+            PerceptionEvent.PowerState(tNanos = 5_000_000_000L, charging = true, batteryPct = 63),
+        )
+        advanceUntilIdle()
+        session.stop(counters(tEndNanos = 6_000_000_000L))
+
+        fun payloadOf(kind: String, index: Int = 0): String {
+            val event = ingested.filter { it.pointer.requireString("valueKind") == kind }[index]
+            return da.getBytes(event.payloadCid).toString(StandardCharsets.UTF_8)
+        }
+        assertTrue(payloadOf("ambient-light").contains("\"luxMilli\":412000"))
+        assertTrue(payloadOf("proximity").contains("\"state\":\"near\""))
+        val wifi = payloadOf("network-context", 0)
+        assertTrue(wifi.contains("\"ssid\":\"HomeBase\""))
+        assertTrue(wifi.contains("\"metered\":false"))
+        val cellular = payloadOf("network-context", 1)
+        assertFalse(cellular.contains("ssid"))
+        assertTrue(cellular.contains("\"metered\":true"))
+        assertTrue(payloadOf("power-state").contains("\"charging\":true"))
+
+        val light = ingested.first { it.pointer.requireString("valueKind") == "ambient-light" }
+        assertEquals(
+            listOf("perception", "sess-funnel", "environment"),
+            light.pointer.stringListOf("channelPath"),
+        )
+        val power = ingested.first { it.pointer.requireString("valueKind") == "power-state" }
+        assertEquals(
+            listOf("perception", "sess-funnel", "power"),
+            power.pointer.stringListOf("channelPath"),
+        )
+    }
+
+    @Test
     fun trackSegmentBeforeAnySceneParentsToRootOnly() = runTest {
         val ingested = mutableListOf<IngestedEvent>()
         val session = PerceptionSession(

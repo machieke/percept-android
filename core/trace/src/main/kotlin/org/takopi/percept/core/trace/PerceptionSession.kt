@@ -254,6 +254,84 @@ class PerceptionSession(
                 provenance = provenance(null),
             )
 
+            is PerceptionEvent.AmbientLight -> ingestor.ingestEvent(
+                rawPayload = cMap(
+                    "kind" to CString("raw-payload"),
+                    "schema" to CString("perception-ambient-light-v0.1"),
+                    "sessionId" to CString(config.sessionId),
+                    "tNanos" to CLong(event.tNanos),
+                    "luxMilli" to CLong(event.luxMilli),
+                    "observedAt" to CString(timeBase.observedAtIso(event.tNanos)),
+                ),
+                observedAt = timeBase.observedAtIso(event.tNanos),
+                actorPath = listOf("device", config.deviceId, "light", "0"),
+                channelPath = channelPath("environment"),
+                valueKind = "ambient-light",
+                parentEventIds = listOf(root),
+                rootEventId = root,
+                provenance = provenance(null),
+            )
+
+            is PerceptionEvent.Proximity -> ingestor.ingestEvent(
+                rawPayload = cMap(
+                    "kind" to CString("raw-payload"),
+                    "schema" to CString("perception-proximity-v0.1"),
+                    "sessionId" to CString(config.sessionId),
+                    "tNanos" to CLong(event.tNanos),
+                    "state" to CString(event.state),
+                    "observedAt" to CString(timeBase.observedAtIso(event.tNanos)),
+                ),
+                observedAt = timeBase.observedAtIso(event.tNanos),
+                actorPath = listOf("device", config.deviceId, "proximity", "0"),
+                channelPath = channelPath("environment"),
+                valueKind = "proximity",
+                parentEventIds = listOf(root),
+                rootEventId = root,
+                provenance = provenance(null),
+            )
+
+            is PerceptionEvent.NetworkContext -> ingestor.ingestEvent(
+                rawPayload = run {
+                    val entries = linkedMapOf<String, org.takopi.percept.core.canonical.CanonicalValue>(
+                        "kind" to CString("raw-payload"),
+                        "schema" to CString("perception-network-v0.1"),
+                        "sessionId" to CString(config.sessionId),
+                        "tNanos" to CLong(event.tNanos),
+                        "transport" to CString(event.transport),
+                        "metered" to org.takopi.percept.core.canonical.CBool(event.metered),
+                        "observedAt" to CString(timeBase.observedAtIso(event.tNanos)),
+                    )
+                    event.ssid?.let { entries["ssid"] = CString(it) }
+                    org.takopi.percept.core.canonical.CMap(entries)
+                },
+                observedAt = timeBase.observedAtIso(event.tNanos),
+                actorPath = listOf("device", config.deviceId, "network", "0"),
+                channelPath = channelPath("network"),
+                valueKind = "network-context",
+                parentEventIds = listOf(root),
+                rootEventId = root,
+                provenance = provenance(null),
+            )
+
+            is PerceptionEvent.PowerState -> ingestor.ingestEvent(
+                rawPayload = cMap(
+                    "kind" to CString("raw-payload"),
+                    "schema" to CString("perception-power-v0.1"),
+                    "sessionId" to CString(config.sessionId),
+                    "tNanos" to CLong(event.tNanos),
+                    "charging" to org.takopi.percept.core.canonical.CBool(event.charging),
+                    "batteryPct" to CLong(event.batteryPct),
+                    "observedAt" to CString(timeBase.observedAtIso(event.tNanos)),
+                ),
+                observedAt = timeBase.observedAtIso(event.tNanos),
+                actorPath = listOf("device", config.deviceId, "battery", "0"),
+                channelPath = channelPath("power"),
+                valueKind = "power-state",
+                parentEventIds = listOf(root),
+                rootEventId = root,
+                provenance = provenance(null),
+            )
+
             is PerceptionEvent.CameraPose -> ingestor.ingestEvent(
                 rawPayload = run {
                     val entries = linkedMapOf<String, org.takopi.percept.core.canonical.CanonicalValue>(

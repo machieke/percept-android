@@ -139,6 +139,54 @@ sealed interface PerceptionEvent {
         }
     }
 
+    /** Ambient light level, gated on order-of-magnitude change. */
+    data class AmbientLight(
+        val tNanos: Long,
+        val luxMilli: Long,
+    ) : PerceptionEvent {
+        init {
+            require(tNanos >= 0) { "tNanos must be non-negative" }
+            require(luxMilli >= 0) { "luxMilli must be non-negative" }
+        }
+    }
+
+    /** Proximity sensor state ("near"/"far") — e.g. phone-in-pocket. */
+    data class Proximity(
+        val tNanos: Long,
+        val state: String,
+    ) : PerceptionEvent {
+        init {
+            require(tNanos >= 0) { "tNanos must be non-negative" }
+            require(state == "near" || state == "far") { "state must be near|far" }
+        }
+    }
+
+    /** Default-network identity: semantic place labels (SSID) plus the
+     *  transport/metered state that explains dispatch behavior. */
+    data class NetworkContext(
+        val tNanos: Long,
+        val transport: String,
+        val ssid: String?,
+        val metered: Boolean,
+    ) : PerceptionEvent {
+        init {
+            require(tNanos >= 0) { "tNanos must be non-negative" }
+            require(transport.isNotBlank()) { "transport must not be blank" }
+        }
+    }
+
+    /** Battery/charging state, gated on charging flips and 5% bands. */
+    data class PowerState(
+        val tNanos: Long,
+        val charging: Boolean,
+        val batteryPct: Long,
+    ) : PerceptionEvent {
+        init {
+            require(tNanos >= 0) { "tNanos must be non-negative" }
+            require(batteryPct in 0..100) { "batteryPct out of range" }
+        }
+    }
+
     /**
      * A compressed slice of the session's full audio, stored as a raw DA
      * artifact (like keyframes) so bundles carry the complete episodic
