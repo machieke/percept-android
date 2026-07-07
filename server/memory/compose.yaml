@@ -10,6 +10,8 @@ services:
       - percept-memory-data:/data
     environment:
       - ASR_URL=http://127.0.0.1:8123
+      - IDENT_URL=http://127.0.0.1:8125
+      - SPEAKER_SIM_THRESHOLD=0.40
       - OLLAMA_URL=http://127.0.0.1:11434
       - VLM_MODEL=gemma3:4b
       - LLM_MODEL=gemma3:4b

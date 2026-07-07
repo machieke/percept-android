@@ -25,6 +25,7 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request
 
 import enrich as enrichment
+from identity import IdentityRegistry
 
 sys.path.insert(0, os.environ.get("REFERENCE_PATH", "/opt/event-trace-memory"))
 
@@ -38,6 +39,8 @@ ASR_URL = os.environ.get("ASR_URL", "http://host.docker.internal:8123")
 MEMORY_TOKEN = os.environ.get("MEMORY_TOKEN", "")
 ENRICH_ENABLED = os.environ.get("ENRICH_ENABLED", "1") == "1"
 MAX_CAPTIONS_PER_CHUNK = int(os.environ.get("MAX_CAPTIONS_PER_CHUNK", "4"))
+IDENT_URL = os.environ.get("IDENT_URL", "http://127.0.0.1:8125")
+IDENT_ENABLED = os.environ.get("IDENT_ENABLED", "1") == "1"
 POINTER_LOG = DATA_ROOT / "pointers.jsonl"
 
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -177,6 +180,9 @@ def transcribe_chunk(pointer: dict, force: bool = False) -> dict | None:
     return {"chunk": chunk_event_id, "asrEventIds": created}
 
 
+identities = IdentityRegistry(DATA_ROOT / "identities.json")
+
+
 def _pointer(event_id: str) -> dict | None:
     result = index.get_event(event_id)
     return result.get("event") if result.get("ok") else None
@@ -184,6 +190,132 @@ def _pointer(event_id: str) -> dict | None:
 
 def _payload(pointer: dict) -> dict:
     return json.loads(da.get_bytes(pointer["payloadCid"]))
+
+
+def identify_chunk(chunk_event_id: str, force: bool = False) -> None:
+    """Pseudonymous who-was-there: voice embeddings per archival asr segment
+    and face embeddings per keyframe, clustered against the persistent
+    registry into speaker-observation / face-observation events."""
+    chunk = _pointer(chunk_event_id)
+    if not chunk:
+        return
+    chunk_payload = _payload(chunk)
+    root = chunk["rootEventId"]
+    audio = da.get_bytes(chunk["outputArtifactIds"][0])
+    chunk_start = chunk_payload["tStartNanos"]
+
+    def has_child_of_kind(event_id: str, kind: str) -> bool:
+        return any(
+            (child := _pointer(child_id)) and child["valueKind"] == kind
+            for child_id in index.by_parent(event_id).get("eventIds", [])
+        )
+
+    for segment_id in index.by_parent(chunk_event_id).get("eventIds", []):
+        segment = _pointer(segment_id)
+        if not segment or segment["valueKind"] != "asr-segment":
+            continue
+        if not force and has_child_of_kind(segment_id, "speaker-observation"):
+            continue
+        seg_payload = _payload(segment)
+        start_ms = max(0, (seg_payload["tStartNanos"] - chunk_start) // 1_000_000)
+        end_ms = (seg_payload["tEndNanos"] - chunk_start) // 1_000_000
+        if end_ms - start_ms < 700:
+            continue  # too short for a stable voiceprint
+        try:
+            request = urllib.request.Request(
+                f"{IDENT_URL}/embed-speaker?startMs={start_ms}&endMs={end_ms}", data=audio,
+            )
+            with urllib.request.urlopen(request, timeout=120) as response:
+                result = json.load(response)
+        except Exception as exc:  # noqa: BLE001 - identity is best-effort
+            print(f"speaker embed failed for {segment_id}: {exc}", flush=True)
+            continue
+        cluster_id, similarity = identities.assign("speaker", result["embedding"])
+        payload = {
+            "kind": "raw-payload",
+            "schema": "perception-speaker-v0.1",
+            "sessionId": seg_payload["sessionId"],
+            "clusterId": cluster_id,
+            "similarityPermille": similarity,
+            "tStartNanos": seg_payload["tStartNanos"],
+            "tEndNanos": seg_payload["tEndNanos"],
+            "observedAt": seg_payload["observedAt"],
+        }
+        label = identities.label_of(cluster_id)
+        if label:
+            payload["label"] = label
+        with ingest_lock:
+            ingest_or_skip_duplicate(
+                raw_payload=payload,
+                observed_at=seg_payload["observedAt"],
+                actor_path=["server", "percept-memory", "speaker-id"],
+                channel_path=[chunk["channelPath"][0], chunk["channelPath"][1], "identity"],
+                value_kind="speaker-observation",
+                preview=label or cluster_id,
+                provenance={
+                    "source": "percept-memory-server",
+                    "observedBy": "percept-memory",
+                    "ingestionPipeline": "event-trace-v0",
+                    "extractionRunId": result.get("modelRunId", "unknown"),
+                },
+                parent_event_ids=[segment_id],
+                root_event_id=root,
+                input_event_ids=[segment_id],
+            )
+
+    window = (chunk_start - 5_000_000_000, chunk_payload["tEndNanos"] + 5_000_000_000)
+    for event_id in index.by_root(root).get("eventIds", []):
+        scene = _pointer(event_id)
+        if not scene or scene["valueKind"] != "scene-change" or not scene.get("outputArtifactIds"):
+            continue
+        scene_payload = _payload(scene)
+        if not window[0] <= scene_payload["tNanos"] <= window[1]:
+            continue
+        if not force and has_child_of_kind(event_id, "face-observation"):
+            continue
+        try:
+            request = urllib.request.Request(
+                f"{IDENT_URL}/embed-faces", data=da.get_bytes(scene["outputArtifactIds"][0]),
+            )
+            with urllib.request.urlopen(request, timeout=120) as response:
+                result = json.load(response)
+        except Exception as exc:  # noqa: BLE001
+            print(f"face embed failed for {event_id}: {exc}", flush=True)
+            continue
+        for face in result.get("faces", []):
+            cluster_id, similarity = identities.assign("face", face["embedding"])
+            payload = {
+                "kind": "raw-payload",
+                "schema": "perception-face-v0.1",
+                "sessionId": scene_payload["sessionId"],
+                "clusterId": cluster_id,
+                "similarityPermille": similarity,
+                "detScorePermille": face["detScorePermille"],
+                "box": face["box"],
+                "tNanos": scene_payload["tNanos"],
+                "observedAt": scene_payload["observedAt"],
+            }
+            label = identities.label_of(cluster_id)
+            if label:
+                payload["label"] = label
+            with ingest_lock:
+                ingest_or_skip_duplicate(
+                    raw_payload=payload,
+                    observed_at=scene_payload["observedAt"],
+                    actor_path=["server", "percept-memory", "face-id"],
+                    channel_path=[scene["channelPath"][0], scene["channelPath"][1], "identity"],
+                    value_kind="face-observation",
+                    preview=label or cluster_id,
+                    provenance={
+                        "source": "percept-memory-server",
+                        "observedBy": "percept-memory",
+                        "ingestionPipeline": "event-trace-v0",
+                        "extractionRunId": result.get("modelRunId", "unknown"),
+                    },
+                    parent_event_ids=[event_id],
+                    root_event_id=root,
+                    input_event_ids=[event_id],
+                )
 
 
 def enrich_chunk(chunk_event_id: str) -> None:
@@ -324,12 +456,19 @@ def enrich_chunk(chunk_event_id: str) -> None:
             append_pointer(ingested.pointer)
 
 
-enrich_queue: "queue.Queue[str]" = queue.Queue()
+enrich_queue: "queue.Queue" = queue.Queue()
 
 
 def enrich_worker() -> None:
     while True:
-        chunk_event_id = enrich_queue.get()
+        item = enrich_queue.get()
+        chunk_event_id, force = item if isinstance(item, tuple) else (item, False)
+        if IDENT_ENABLED:
+            try:
+                # Identity first: embeddings take milliseconds, captions minutes.
+                identify_chunk(chunk_event_id, force=force)
+            except Exception as exc:  # noqa: BLE001 - identity is best-effort
+                print(f"identification failed for {chunk_event_id}: {exc}", flush=True)
         try:
             enrich_chunk(chunk_event_id)
         except Exception as exc:  # noqa: BLE001 - enrichment is best-effort
@@ -354,16 +493,37 @@ def healthz() -> dict:
 
 
 @app.post("/enrich")
-def enrich_backfill(sessionId: str, authorization: str | None = Header(None)) -> dict:
-    """Queue enrichment for every audio chunk of a session (backfill)."""
+def enrich_backfill(
+    sessionId: str, force: int = 0, authorization: str | None = Header(None),
+) -> dict:
+    """Queue enrichment for every audio chunk of a session (backfill).
+    force=1 re-runs identity observations (e.g. after threshold retuning)."""
     check_auth(authorization)
     queued = 0
     for event_id in index.by_kind("audio-chunk").get("eventIds", []):
         pointer = _pointer(event_id)
         if pointer and _payload(pointer).get("sessionId") == sessionId:
-            enrich_queue.put(event_id)
+            enrich_queue.put((event_id, bool(force)))
             queued += 1
     return {"ok": True, "queued": queued}
+
+
+@app.get("/identities")
+def list_identities(authorization: str | None = Header(None)) -> dict:
+    """Pseudonymous cluster summary: observation counts and any labels."""
+    check_auth(authorization)
+    return {"ok": True, "identities": identities.summary()}
+
+
+@app.post("/label")
+def label_identity(clusterId: str, name: str, authorization: str | None = Header(None)) -> dict:
+    """Attach a human name to a speaker/face cluster (applies prospectively;
+    past events keep their pseudonymous clusterId, resolvable via the
+    registry)."""
+    check_auth(authorization)
+    if not identities.label(clusterId, name):
+        raise HTTPException(status_code=404, detail=f"unknown cluster: {clusterId}")
+    return {"ok": True, "clusterId": clusterId, "label": name}
 
 
 @app.post("/retranscribe")

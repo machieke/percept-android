@@ -1,0 +1,14 @@
+services:
+  percept-ident:
+    build: .
+    container_name: percept-ident
+    ports:
+      - "8125:8000"
+    volumes:
+      - percept-ident-models:/models
+    environment:
+      - IDENT_THREADS=2
+    restart: unless-stopped
+
+volumes:
+  percept-ident-models:
