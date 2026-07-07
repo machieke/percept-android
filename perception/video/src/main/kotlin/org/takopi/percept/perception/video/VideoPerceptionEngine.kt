@@ -44,9 +44,14 @@ class VideoPerceptionEngine(
     private val tracker: IouTrackAggregator = IouTrackAggregator(),
     private val gate: SceneChangeGate = SceneChangeGate(),
     private val keyframeSelectionFrames: Int = DEFAULT_KEYFRAME_SELECTION_FRAMES,
+    /** Tracks shorter than this are detector flicker, not presences: a
+     *  dashcam session produced 1369 track segments in 12 min, mostly
+     *  sub-second churn. 0 keeps everything. */
+    private val minTrackDurationNanos: Long = 0,
 ) {
     init {
         require(keyframeSelectionFrames >= 0) { "keyframeSelectionFrames must be >= 0" }
+        require(minTrackDurationNanos >= 0) { "minTrackDurationNanos must be >= 0" }
     }
 
     private var framesProcessed = 0L
@@ -134,6 +139,7 @@ class VideoPerceptionEngine(
     }
 
     private fun submit(segment: TrackSegment) {
+        if (segment.tEndNanos - segment.tStartNanos < minTrackDurationNanos) return
         sink.trySubmit(
             PerceptionEvent.TrackSegment(
                 trackId = segment.trackId.toLong(),

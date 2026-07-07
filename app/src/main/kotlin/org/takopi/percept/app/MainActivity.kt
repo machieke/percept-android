@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -208,6 +209,9 @@ private fun SessionScreen(
         )
 
         HorizontalDivider()
+        CaptureSettingsSection(settings = settings, enabled = !state.running)
+
+        HorizontalDivider()
         Text(text = "Live events", style = MaterialTheme.typography.titleMedium)
         LazyColumn(modifier = Modifier.fillMaxWidth()) {
             items(state.recentEvents) { entry ->
@@ -223,6 +227,73 @@ private fun SessionScreen(
             }
         }
     }
+}
+
+@Composable
+private fun CaptureSettingsSection(settings: PerceptSettings, enabled: Boolean) {
+    Text(text = "Capture (applies to next session)", style = MaterialTheme.typography.titleMedium)
+
+    @Composable
+    fun toggle(label: String, get: () -> Boolean, set: (Boolean) -> Unit) {
+        var checked by remember { mutableStateOf(get()) }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(
+                checked = checked,
+                enabled = enabled,
+                onCheckedChange = { value ->
+                    checked = value
+                    set(value)
+                },
+            )
+            Text(text = label, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+
+    toggle("Camera (tracks, scenes, keyframes)", { settings.captureVideo }, { settings.captureVideo = it })
+    toggle("Speech recognition (live ASR)", { settings.captureAsr }, { settings.captureAsr = it })
+    toggle("Audio tags (YAMNet)", { settings.captureAudioTags }, { settings.captureAudioTags = it })
+    toggle("Full audio chunks (Opus)", { settings.captureAudioChunks }, { settings.captureAudioChunks = it })
+    toggle("Location + GPS velocity", { settings.captureLocation }, { settings.captureLocation = it })
+    toggle("Motion (IMU still/moving)", { settings.captureMotion }, { settings.captureMotion = it })
+    toggle("Camera pose (elevation/azimuth)", { settings.capturePose }, { settings.capturePose = it })
+    toggle("Light & proximity", { settings.captureEnvironment }, { settings.captureEnvironment = it })
+    toggle("Network identity (SSID)", { settings.captureNetwork }, { settings.captureNetwork = it })
+    toggle("Battery/charging", { settings.capturePower }, { settings.capturePower = it })
+
+    @Composable
+    fun numberField(label: String, get: () -> Int, set: (Int) -> Unit) {
+        var text by remember { mutableStateOf(get().toString()) }
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = text,
+            enabled = enabled,
+            onValueChange = { value ->
+                text = value
+                value.toIntOrNull()?.let(set)
+            },
+            label = { Text(label) },
+            singleLine = true,
+        )
+    }
+
+    numberField(
+        "Scene cooldown (s) — higher = fewer keyframes",
+        { settings.sceneCooldownSeconds },
+        { settings.sceneCooldownSeconds = it },
+    )
+    numberField(
+        "Keyframe JPEG quality (10-100)",
+        { settings.keyframeQuality },
+        { settings.keyframeQuality = it },
+    )
+    numberField(
+        "Min track duration (ms) — filters detector flicker",
+        { settings.minTrackDurationMs },
+        { settings.minTrackDurationMs = it },
+    )
 }
 
 /** Bundle zips live in app-scoped storage other apps cannot browse; a share

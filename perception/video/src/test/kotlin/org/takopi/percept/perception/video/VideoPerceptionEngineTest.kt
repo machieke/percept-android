@@ -149,6 +149,29 @@ class VideoPerceptionEngineTest {
     }
 
     @Test
+    fun shortFlickerTracksAreFilteredWhenConfigured() {
+        val sink = RecordingSink()
+        val engine = VideoPerceptionEngine(
+            sink,
+            tracker = IouTrackAggregator(missedFrameLimit = 1),
+            keyframeSelectionFrames = 0,
+            minTrackDurationNanos = 1_000_000_000L,
+        )
+        val box = PixelBox(10, 10, 50, 90)
+        // One-frame flicker: closes with zero duration -> filtered.
+        engine.onFrame(frame(0, listOf(detection("cup", box))))
+        engine.onFrame(frame(100_000_000L, emptyList()))
+        // Durable track: 2 s -> survives the filter.
+        engine.onFrame(frame(1_000_000_000L, listOf(detection("person", box))))
+        engine.onFrame(frame(3_000_000_000L, listOf(detection("person", box))))
+        engine.finish()
+
+        val tracks = sink.ofType<PerceptionEvent.TrackSegment>()
+        assertEquals(1, tracks.size)
+        assertEquals("person", tracks.single().label)
+    }
+
+    @Test
     fun pendingScenePicksSharpestFrameInSelectionWindow() {
         val sink = RecordingSink()
         val engine = VideoPerceptionEngine(sink, keyframeSelectionFrames = 3)

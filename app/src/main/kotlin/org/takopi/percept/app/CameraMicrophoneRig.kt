@@ -25,8 +25,10 @@ import org.takopi.percept.perception.audio.NativeWhisper
 import org.takopi.percept.perception.video.FrameRateGovernor
 import org.takopi.percept.perception.video.MediaPipeFrameDetector
 import org.takopi.percept.perception.video.PerceptFrameAnalyzer
+import org.takopi.percept.perception.video.SceneChangeGate
 import org.takopi.percept.perception.video.ThermalLevel
 import org.takopi.percept.perception.video.VideoPerceptionEngine
+import org.takopi.percept.perception.video.VideoRunCounters
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
@@ -42,14 +44,29 @@ class CameraMicrophoneRig(
     private val lifecycleOwner: LifecycleOwner,
     private val onError: ((String) -> Unit)? = null,
 ) : PerceptionRig {
-    private val detector = MediaPipeFrameDetector.createWithFallback(context)
-    private val tagger = TfLiteYamnetTagger.create(context)
-    private val asrPair = createAsrEngine()
+    private val settings = PerceptSettings(context)
+    private val detector =
+        if (settings.captureVideo) MediaPipeFrameDetector.createWithFallback(context) else null
+    private val tagger =
+        if (settings.captureAudioTags) TfLiteYamnetTagger.create(context) else null
+    private val asrPair =
+        if (settings.captureAsr) {
+            createAsrEngine()
+        } else {
+            org.takopi.percept.perception.audio.NoopAsrEngine() to "asr-disabled"
+        }
 
-    override val detectorRunId: String = detector.extractionRunId
+    override val detectorRunId: String = detector?.extractionRunId ?: "video-disabled"
     override val sceneGateRunId: String = SCENE_GATE_RUN_ID
-    override val audioTaggerRunId: String = tagger.extractionRunId
+    override val audioTaggerRunId: String = tagger?.extractionRunId ?: "audio-tags-disabled"
     override val asrRunId: String = asrPair.second
+
+    private object NoopTagger : org.takopi.percept.perception.audio.AudioTagger {
+        override fun classifyTop(
+            samples: ShortArray,
+            sampleRate: Int,
+        ): org.takopi.percept.perception.audio.AudioTagScore? = null
+    }
 
     private val governor = FrameRateGovernor(targetFps = 10)
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -69,67 +86,95 @@ class CameraMicrophoneRig(
 
     override fun start(sink: TraceSink, timeBase: SessionTimeBase) {
         this.timeBase = timeBase
-        val engine = VideoPerceptionEngine(sink)
-        videoEngine = engine
-        val analyzer = PerceptFrameAnalyzer(
-            engine = engine,
-            detector = detector,
-            timeBase = timeBase,
-            governor = governor,
-            thermalLevelProvider = ::currentThermalLevel,
-            onAnalysisError = { e ->
-                onError?.invoke("video analysis failing: ${e.message}")
-            },
-        )
-        this.analyzer = analyzer
-        val executor = Executors.newSingleThreadExecutor()
-        analysisExecutor = executor
-        val analysis = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setTargetResolution(Size(640, 480))
-            .build()
-            .also { it.setAnalyzer(executor, analyzer) }
-        val providerFuture = ProcessCameraProvider.getInstance(context)
-        providerFuture.addListener({
-            val provider = providerFuture.get()
-            cameraProvider = provider
-            provider.unbindAll()
-            provider.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                analysis,
+
+        if (settings.captureVideo && detector != null) {
+            val engine = VideoPerceptionEngine(
+                sink = sink,
+                gate = SceneChangeGate(
+                    minIntervalNanos = settings.sceneCooldownSeconds * 1_000_000_000L,
+                ),
+                minTrackDurationNanos = settings.minTrackDurationMs * 1_000_000L,
             )
-        }, ContextCompat.getMainExecutor(context))
+            videoEngine = engine
+            val analyzer = PerceptFrameAnalyzer(
+                engine = engine,
+                detector = detector,
+                timeBase = timeBase,
+                governor = governor,
+                thermalLevelProvider = ::currentThermalLevel,
+                jpegQuality = settings.keyframeQuality,
+                onAnalysisError = { e ->
+                    onError?.invoke("video analysis failing: ${e.message}")
+                },
+            )
+            this.analyzer = analyzer
+            val executor = Executors.newSingleThreadExecutor()
+            analysisExecutor = executor
+            val analysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setTargetResolution(Size(640, 480))
+                .build()
+                .also { it.setAnalyzer(executor, analyzer) }
+            val providerFuture = ProcessCameraProvider.getInstance(context)
+            providerFuture.addListener({
+                val provider = providerFuture.get()
+                cameraProvider = provider
+                provider.unbindAll()
+                provider.bindToLifecycle(
+                    lifecycleOwner,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    analysis,
+                )
+            }, ContextCompat.getMainExecutor(context))
+        }
 
-        val audioStartTNanos = timeBase.elapsedNanos(SystemClock.elapsedRealtimeNanos())
-        val audioEngine = AudioPerceptionEngine(
-            sink = sink,
-            asr = asrPair.first,
-            tagger = tagger,
-            startTNanos = audioStartTNanos,
-        )
-        // Full-session compressed audio → DA artifacts: bundles carry the
-        // complete episodic record for server-side processing.
-        val chunkRecorder = AudioChunkRecorder(
-            sink = sink,
-            encoder = AudioChunkEncoders.createBest(context),
-            startTNanos = audioStartTNanos,
-        )
-        audioPipeline = AudioCapturePipeline(
-            engine = audioEngine,
-            chunkRecorder = chunkRecorder,
-        ).also(AudioCapturePipeline::start)
+        if (settings.captureMicrophone) {
+            val audioStartTNanos = timeBase.elapsedNanos(SystemClock.elapsedRealtimeNanos())
+            val audioEngine = AudioPerceptionEngine(
+                sink = sink,
+                asr = asrPair.first,
+                tagger = tagger ?: NoopTagger,
+                startTNanos = audioStartTNanos,
+            )
+            // Full-session compressed audio → DA artifacts: bundles carry the
+            // complete episodic record for server-side processing.
+            val chunkRecorder = if (settings.captureAudioChunks) {
+                AudioChunkRecorder(
+                    sink = sink,
+                    encoder = AudioChunkEncoders.createBest(context),
+                    startTNanos = audioStartTNanos,
+                )
+            } else {
+                null
+            }
+            audioPipeline = AudioCapturePipeline(
+                engine = audioEngine,
+                chunkRecorder = chunkRecorder,
+            ).also(AudioCapturePipeline::start)
+        }
 
-        locationTracker = LocationTracker(context, sink, timeBase).also { tracker ->
-            if (!tracker.start()) {
-                onError?.invoke("location unavailable (permission or providers); no location-fix events")
+        if (settings.captureLocation) {
+            locationTracker = LocationTracker(context, sink, timeBase).also { tracker ->
+                if (!tracker.start()) {
+                    onError?.invoke("location unavailable (permission or providers); no location-fix events")
+                }
             }
         }
-        motionTracker = MotionTracker(context, sink, timeBase).also { it.start() }
-        orientationTracker = OrientationTracker(context, sink, timeBase).also { it.start() }
-        environmentTracker = EnvironmentTracker(context, sink, timeBase).also { it.start() }
-        networkTracker = NetworkTracker(context, sink, timeBase).also { it.start() }
-        powerTracker = PowerTracker(context, sink, timeBase).also { it.start() }
+        if (settings.captureMotion) {
+            motionTracker = MotionTracker(context, sink, timeBase).also { it.start() }
+        }
+        if (settings.capturePose) {
+            orientationTracker = OrientationTracker(context, sink, timeBase).also { it.start() }
+        }
+        if (settings.captureEnvironment) {
+            environmentTracker = EnvironmentTracker(context, sink, timeBase).also { it.start() }
+        }
+        if (settings.captureNetwork) {
+            networkTracker = NetworkTracker(context, sink, timeBase).also { it.start() }
+        }
+        if (settings.capturePower) {
+            powerTracker = PowerTracker(context, sink, timeBase).also { it.start() }
+        }
     }
 
     override fun stop(): PerceptionRunCounters {
@@ -155,15 +200,24 @@ class CameraMicrophoneRig(
             executor.shutdown()
             executor.awaitTermination(3, TimeUnit.SECONDS)
         }
-        val video = checkNotNull(videoEngine) { "rig not started" }.finish()
+        val video = videoEngine?.finish()
+            ?: VideoRunCounters(framesProcessed = 0, droppedFrames = 0, lastFrameTNanos = 0)
         // A whisper window runs ~30 s on this device; abort the in-flight
         // transcription so the audio processing thread can be joined promptly.
         (asrPair.first as? CancellableAsrEngine)?.cancelInFlight()
-        val audio = checkNotNull(audioPipeline) { "rig not started" }.stop()
+        val audio = audioPipeline?.stop() ?: org.takopi.percept.perception.audio.AudioRunCounters(
+            ringBufferOverruns = 0,
+            appendedSamples = 0,
+            lastProcessedTNanos = 0,
+            asrWindowsProcessed = 0,
+            asrWindowsTranscribed = 0,
+            asrWindowsSkipped = 0,
+            asrTranscribeMillis = 0,
+        )
         // A poisoned inference graph can throw from close(); the session's
         // data is already safe, so never let teardown fail the stop.
-        runCatching(detector::close)
-        runCatching(tagger::close)
+        detector?.let { runCatching(it::close) }
+        tagger?.let { runCatching(it::close) }
         val base = checkNotNull(timeBase)
         return PerceptionRunCounters(
             tEndNanos = base.elapsedNanos(SystemClock.elapsedRealtimeNanos()),
@@ -202,7 +256,7 @@ class CameraMicrophoneRig(
      */
     private fun createAsrEngine(): Pair<org.takopi.percept.perception.audio.AsrEngine, String> {
         val local = createLocalAsrEngine()
-        val remoteUrl = PerceptSettings(context).asrEndpointUrl
+        val remoteUrl = settings.asrEndpointUrl
         if (remoteUrl.isBlank()) return local
         val remote = RemoteAsrEngine(remoteUrl)
         val engine = FallbackAsrEngine(
