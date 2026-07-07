@@ -80,6 +80,10 @@ sealed interface PerceptionEvent {
         val accuracyCm: Long,
         val altitudeCm: Long?,
         val provider: String,
+        /** Doppler-measured ground speed (never accelerometer-integrated). */
+        val speedCmPerS: Long? = null,
+        /** Bearing in centi-degrees [0, 36000). */
+        val bearingCentiDeg: Long? = null,
     ) : PerceptionEvent {
         init {
             require(tNanos >= 0) { "tNanos must be non-negative" }
@@ -87,6 +91,31 @@ sealed interface PerceptionEvent {
             require(lonE7 in -1_800_000_000..1_800_000_000) { "lonE7 out of range" }
             require(accuracyCm >= 0) { "accuracyCm must be non-negative" }
             require(provider.isNotBlank()) { "provider must not be blank" }
+            speedCmPerS?.let { require(it >= 0) { "speedCmPerS must be non-negative" } }
+            bearingCentiDeg?.let { require(it in 0..35_999) { "bearingCentiDeg out of range" } }
+        }
+    }
+
+    /**
+     * Run-length motion state from the IMU: how the device was moving, not
+     * how fast — integrating accelerometers into velocity drifts into
+     * nonsense within seconds; real speed comes from GPS Doppler on
+     * [LocationFix]. Acceleration values are linear (gravity-removed), in
+     * integer cm/s².
+     */
+    data class MotionSegment(
+        val state: String,
+        val tStartNanos: Long,
+        val tEndNanos: Long,
+        val rmsAccelCmS2: Long,
+        val peakAccelCmS2: Long,
+    ) : PerceptionEvent {
+        init {
+            require(state.isNotBlank()) { "state must not be blank" }
+            require(tStartNanos >= 0) { "tStartNanos must be non-negative" }
+            require(tEndNanos >= tStartNanos) { "tEndNanos must be >= tStartNanos" }
+            require(rmsAccelCmS2 >= 0) { "rmsAccelCmS2 must be non-negative" }
+            require(peakAccelCmS2 >= rmsAccelCmS2) { "peak must be >= rms" }
         }
     }
 

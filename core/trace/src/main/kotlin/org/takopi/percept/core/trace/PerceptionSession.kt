@@ -238,15 +238,38 @@ class PerceptionSession(
                         "provider" to CString(event.provider),
                         "observedAt" to CString(timeBase.observedAtIso(event.tNanos)),
                     )
-                    // Optional key: absent entirely when unknown (presence
+                    // Optional keys: absent entirely when unknown (presence
                     // changes canonical bytes).
                     event.altitudeCm?.let { entries["altitudeCm"] = CLong(it) }
+                    event.speedCmPerS?.let { entries["speedCmPerS"] = CLong(it) }
+                    event.bearingCentiDeg?.let { entries["bearingCentiDeg"] = CLong(it) }
                     org.takopi.percept.core.canonical.CMap(entries)
                 },
                 observedAt = timeBase.observedAtIso(event.tNanos),
                 actorPath = listOf("device", config.deviceId, "location", "0"),
                 channelPath = channelPath("location"),
                 valueKind = "location-fix",
+                parentEventIds = listOf(root),
+                rootEventId = root,
+                provenance = provenance(null),
+            )
+
+            is PerceptionEvent.MotionSegment -> ingestor.ingestEvent(
+                rawPayload = cMap(
+                    "kind" to CString("raw-payload"),
+                    "schema" to CString("perception-motion-v0.1"),
+                    "sessionId" to CString(config.sessionId),
+                    "state" to CString(event.state),
+                    "tStartNanos" to CLong(event.tStartNanos),
+                    "tEndNanos" to CLong(event.tEndNanos),
+                    "rmsAccelCmS2" to CLong(event.rmsAccelCmS2),
+                    "peakAccelCmS2" to CLong(event.peakAccelCmS2),
+                    "observedAt" to CString(timeBase.observedAtIso(event.tEndNanos)),
+                ),
+                observedAt = timeBase.observedAtIso(event.tEndNanos),
+                actorPath = listOf("device", config.deviceId, "imu", "0"),
+                channelPath = channelPath("motion"),
+                valueKind = "motion-segment",
                 parentEventIds = listOf(root),
                 rootEventId = root,
                 provenance = provenance(null),

@@ -211,6 +211,17 @@ class PerceptionSessionTest {
                 accuracyCm = 850,
                 altitudeCm = 4_200,
                 provider = "gps",
+                speedCmPerS = 340,
+                bearingCentiDeg = 27_350,
+            ),
+        )
+        session.trySubmit(
+            PerceptionEvent.MotionSegment(
+                state = "moving",
+                tStartNanos = 10_000_000_000L,
+                tEndNanos = 20_000_000_000L,
+                rmsAccelCmS2 = 85,
+                peakAccelCmS2 = 240,
             ),
         )
         session.trySubmit(
@@ -241,9 +252,26 @@ class PerceptionSessionTest {
         assertTrue(withAltitude.contains("\"latE7\":508512345"))
         assertTrue(withAltitude.contains("\"accuracyCm\":850"))
         assertTrue(withAltitude.contains("\"altitudeCm\":4200"))
-        // Optional key entirely absent when unknown (§0.3 presence rule).
+        assertTrue(withAltitude.contains("\"speedCmPerS\":340"))
+        assertTrue(withAltitude.contains("\"bearingCentiDeg\":27350"))
+        // Optional keys entirely absent when unknown (§0.3 presence rule).
         val withoutAltitude = da.getBytes(fixes[1].payloadCid).toString(StandardCharsets.UTF_8)
         assertFalse(withoutAltitude.contains("altitudeCm"))
+        assertFalse(withoutAltitude.contains("speedCmPerS"))
+
+        val motion = ingested.single { it.pointer.requireString("valueKind") == "motion-segment" }
+        assertEquals(
+            listOf("device", "moto-g84-5g", "imu", "0"),
+            motion.pointer.stringListOf("actorPath"),
+        )
+        assertEquals(
+            listOf("perception", "sess-funnel", "motion"),
+            motion.pointer.stringListOf("channelPath"),
+        )
+        val motionPayload = da.getBytes(motion.payloadCid).toString(StandardCharsets.UTF_8)
+        assertTrue(motionPayload.contains("\"state\":\"moving\""))
+        assertTrue(motionPayload.contains("\"rmsAccelCmS2\":85"))
+        assertTrue(motionPayload.contains("\"peakAccelCmS2\":240"))
     }
 
     @Test

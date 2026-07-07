@@ -133,6 +133,16 @@ class LocationTracker(
                 accuracyCm = if (location.hasAccuracy()) (location.accuracy * 100f).toLong() else 0,
                 altitudeCm = if (location.hasAltitude()) (location.altitude * 100.0).toLong() else null,
                 provider = location.provider ?: "unknown",
+                speedCmPerS = if (location.hasSpeed()) {
+                    (location.speed * 100f).toLong().coerceAtLeast(0)
+                } else {
+                    null
+                },
+                bearingCentiDeg = if (location.hasBearing()) {
+                    (location.bearing * 100f).toLong().mod(36_000L)
+                } else {
+                    null
+                },
             ),
         )
     }
