@@ -40,8 +40,11 @@ object CameraPoseMath {
  * azimuth) or on a stationary heartbeat — low-rate like every modality.
  */
 class CameraPoseGate(
-    private val minAngleCentiDeg: Long = 1_500,
+    private val minAngleCentiDeg: Long = 2_500,
     private val minIntervalNanos: Long = 60_000_000_000L,
+    /** Hard rate floor: hand sway while walking crosses any angle gate
+     *  constantly (a real session emitted 81 poses in 55 s at 15°). */
+    private val minSpacingNanos: Long = 5_000_000_000L,
 ) {
     private var lastElevation: Long? = null
     private var lastAzimuth: Long = 0
@@ -49,6 +52,9 @@ class CameraPoseGate(
 
     fun shouldEmit(tNanos: Long, elevationCentiDeg: Long, azimuthCentiDeg: Long): Boolean {
         val previous = lastElevation
+        if (previous != null && tNanos - lastTNanos < minSpacingNanos) {
+            return false
+        }
         if (previous == null ||
             tNanos - lastTNanos >= minIntervalNanos ||
             abs(elevationCentiDeg - previous) >= minAngleCentiDeg ||

@@ -48,7 +48,7 @@ class CameraPoseMathTest {
 class CameraPoseGateTest {
     @Test
     fun firstPoseEmitsThenSmallDriftSuppressed() {
-        val gate = CameraPoseGate(minAngleCentiDeg = 1_500)
+        val gate = CameraPoseGate(minAngleCentiDeg = 1_500, minSpacingNanos = 0)
         assertTrue(gate.shouldEmit(0, 0, 18_000))
         assertFalse(gate.shouldEmit(1_000_000_000L, 500, 18_500))
         assertTrue(gate.shouldEmit(2_000_000_000L, 2_000, 18_500))
@@ -59,11 +59,21 @@ class CameraPoseGateTest {
         assertEquals(1_000L, CameraPoseGate.azimuthDelta(35_800, 800))
         assertEquals(0L, CameraPoseGate.azimuthDelta(0, 0))
         assertEquals(18_000L, CameraPoseGate.azimuthDelta(0, 18_000))
-        val gate = CameraPoseGate(minAngleCentiDeg = 1_500)
+        val gate = CameraPoseGate(minAngleCentiDeg = 1_500, minSpacingNanos = 0)
         gate.shouldEmit(0, 0, 35_900)
         // 3.5° across the north wrap: 35900 -> 200 is only 3° apart... 300 units
         assertFalse(gate.shouldEmit(1, 0, 200))
         assertTrue(gate.shouldEmit(2, 0, 1_500))
+    }
+
+    @Test
+    fun rateFloorCapsSwayDrivenEmission() {
+        val gate = CameraPoseGate(minAngleCentiDeg = 1_500, minSpacingNanos = 5_000_000_000L)
+        assertTrue(gate.shouldEmit(0, 0, 0))
+        // Wild swings within 5 s stay suppressed regardless of angle.
+        assertFalse(gate.shouldEmit(1_000_000_000L, 6_000, 9_000))
+        assertFalse(gate.shouldEmit(4_900_000_000L, -6_000, 27_000))
+        assertTrue(gate.shouldEmit(5_000_000_000L, -6_000, 27_000))
     }
 
     @Test
