@@ -61,6 +61,7 @@ class CameraMicrophoneRig(
     private var analyzer: PerceptFrameAnalyzer? = null
     private var locationTracker: LocationTracker? = null
     private var motionTracker: MotionTracker? = null
+    private var orientationTracker: OrientationTracker? = null
     private var timeBase: SessionTimeBase? = null
 
     override fun start(sink: TraceSink, timeBase: SessionTimeBase) {
@@ -122,11 +123,13 @@ class CameraMicrophoneRig(
             }
         }
         motionTracker = MotionTracker(context, sink, timeBase).also { it.start() }
+        orientationTracker = OrientationTracker(context, sink, timeBase).also { it.start() }
     }
 
     override fun stop(): PerceptionRunCounters {
         locationTracker?.stop()
         motionTracker?.stop()
+        orientationTracker?.stop()
         // Called from a background coroutine; CameraX requires unbinding on
         // the main thread.
         cameraProvider?.let { provider ->

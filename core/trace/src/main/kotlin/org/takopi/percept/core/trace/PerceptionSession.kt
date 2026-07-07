@@ -254,6 +254,29 @@ class PerceptionSession(
                 provenance = provenance(null),
             )
 
+            is PerceptionEvent.CameraPose -> ingestor.ingestEvent(
+                rawPayload = run {
+                    val entries = linkedMapOf<String, org.takopi.percept.core.canonical.CanonicalValue>(
+                        "kind" to CString("raw-payload"),
+                        "schema" to CString("perception-camera-pose-v0.1"),
+                        "sessionId" to CString(config.sessionId),
+                        "tNanos" to CLong(event.tNanos),
+                        "elevationCentiDeg" to CLong(event.elevationCentiDeg),
+                        "azimuthCentiDeg" to CLong(event.azimuthCentiDeg),
+                        "observedAt" to CString(timeBase.observedAtIso(event.tNanos)),
+                    )
+                    event.accuracy?.let { entries["accuracy"] = CString(it) }
+                    org.takopi.percept.core.canonical.CMap(entries)
+                },
+                observedAt = timeBase.observedAtIso(event.tNanos),
+                actorPath = listOf("device", config.deviceId, "imu", "0"),
+                channelPath = channelPath("pose"),
+                valueKind = "camera-pose",
+                parentEventIds = listOf(root),
+                rootEventId = root,
+                provenance = provenance(null),
+            )
+
             is PerceptionEvent.MotionSegment -> ingestor.ingestEvent(
                 rawPayload = cMap(
                     "kind" to CString("raw-payload"),

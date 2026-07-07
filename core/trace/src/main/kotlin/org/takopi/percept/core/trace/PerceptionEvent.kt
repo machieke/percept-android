@@ -120,6 +120,26 @@ sealed interface PerceptionEvent {
     }
 
     /**
+     * Where the (back) camera is pointing, from the fused rotation-vector
+     * sensor: elevation of the optical axis vs the horizon (+9000 = straight
+     * up, -9000 = straight down) and compass azimuth, both in centi-degrees.
+     * Low-rate: capture gates on angular change.
+     */
+    data class CameraPose(
+        val tNanos: Long,
+        val elevationCentiDeg: Long,
+        val azimuthCentiDeg: Long,
+        /** Sensor-reported accuracy ("high"/"medium"/"low"/"unreliable"). */
+        val accuracy: String? = null,
+    ) : PerceptionEvent {
+        init {
+            require(tNanos >= 0) { "tNanos must be non-negative" }
+            require(elevationCentiDeg in -9_000..9_000) { "elevationCentiDeg out of range" }
+            require(azimuthCentiDeg in 0..35_999) { "azimuthCentiDeg out of range" }
+        }
+    }
+
+    /**
      * A compressed slice of the session's full audio, stored as a raw DA
      * artifact (like keyframes) so bundles carry the complete episodic
      * record for server-side processing.
