@@ -397,9 +397,17 @@ def resolve_names(session_id: str, max_reads_per_cluster: int = 5) -> dict:
             if name:
                 votes[name] += 1
         if votes:
-            winner, count = votes.most_common(1)[0]
-            # Confidence scales with corroboration across keyframes.
-            conf = min(950, 600 + count * 100)
+            # Vote on the first-name token too: the VLM reads first names
+            # stably off pixelated labels but hallucinates surnames, so full
+            # names fragment the tally. Prefer the most-corroborated full
+            # name that shares the winning first name.
+            first_votes: "collections.Counter[str]" = collections.Counter()
+            for full, n in votes.items():
+                first_votes[full.split()[0]] += n
+            top_first, first_count = first_votes.most_common(1)[0]
+            candidates = {f: n for f, n in votes.items() if f.split()[0] == top_first}
+            winner = max(candidates, key=lambda f: (candidates[f], len(f)))
+            conf = min(950, 500 + first_count * 100)
             if identities.label(cluster_id, winner, method="on-screen-label", confidence=conf):
                 resolved[cluster_id] = winner
     return resolved

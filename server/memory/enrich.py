@@ -106,9 +106,21 @@ def read_name_label(jpeg: bytes, box: list[int]) -> str | None:
         )
     )
     buffer = io.BytesIO()
-    crop.convert("RGB").save(buffer, format="JPEG")
-    raw = _generate(VLM_MODEL, NAME_PROMPT, images=[base64.b64encode(buffer.getvalue()).decode("ascii")])
-    return _clean_name(raw)
+    # Upscale small crops — video-call name labels are only ~12 px tall in a
+    # 720 px keyframe, below the VLM's legibility without magnification.
+    if crop.width < 320:
+        scale = 320 / crop.width
+        crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS)
+    crop.convert("RGB").save(buffer, format="JPEG", quality=95)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    # One retry: a single bad frame 500s ollama and otherwise stalls the pass.
+    for attempt in range(2):
+        try:
+            return _clean_name(_generate(VLM_MODEL, NAME_PROMPT, images=[encoded]))
+        except Exception:  # noqa: BLE001
+            if attempt == 1:
+                return None
+    return None
 
 
 def _clean_name(raw: str) -> str | None:
