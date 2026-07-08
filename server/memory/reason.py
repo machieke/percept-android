@@ -179,10 +179,46 @@ def language_conclusions(evidence: dict) -> list[dict]:
     return out
 
 
+def speaker_name_conclusions(evidence: dict) -> list[dict]:
+    """Match an audio speaker cluster to a name using the meeting-screen glow:
+    each of the cluster's utterances was attributed (active-speaker highlight)
+    to a named tile, so the cluster's name is the one its utterances most agree
+    on. Confidence grows with the number of attributed utterances; frequency is
+    the share agreeing (a cluster that spans several on-screen people stays
+    honestly low)."""
+    out = []
+    for cluster_id, attributions in evidence.get("speaker_names", {}).items():
+        names = [a["name"] for a in attributions if a["name"]]
+        total = len(names)
+        if total == 0:
+            continue
+        top, positive = collections.Counter(names).most_common(1)[0]
+        frequency, confidence = nal_truth(positive, total)
+        out.append(
+            {
+                "subjectKind": "speaker",
+                "subjectId": cluster_id,
+                "predicate": "has-name",
+                "object": top,
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": positive,
+                "totalEvidence": total,
+                "statement": (
+                    f"{cluster_id} has-name '{top}' (screen-glow attribution, "
+                    f"{frequency / 10:.0f}% of {total} utterances)"
+                ),
+                "evidenceEventIds": [a["eventId"] for a in attributions],
+            }
+        )
+    return out
+
+
 REASONERS = {
     "identity-namer-v0": name_conclusions,
     "recurrence-v0": recurrence_conclusions,
     "language-v0": language_conclusions,
+    "speaker-namer-v0": speaker_name_conclusions,
 }
 
 

@@ -147,6 +147,30 @@ def read_name_label(jpeg: bytes, box: list[int]) -> str | None:
     return None
 
 
+def read_caption_name(jpeg: bytes) -> str | None:
+    """Read a name from an already-cropped caption strip (a meeting tile's
+    bottom-left label, extracted from the homography-stabilized frame). Upscales
+    then reads with the VLM; roster-snapping in the reasoner repairs surnames."""
+    import io
+
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    if im.width < 400:
+        scale = 400 / im.width
+        im = im.resize((int(im.width * scale), int(im.height * scale)), Image.LANCZOS)
+    buffer = io.BytesIO()
+    im.save(buffer, format="JPEG", quality=95)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    for attempt in range(2):
+        try:
+            return _clean_name(_generate(VLM_MODEL, NAME_PROMPT, images=[encoded]))
+        except Exception:  # noqa: BLE001
+            if attempt == 1:
+                return None
+    return None
+
+
 def _clean_name(raw: str) -> str | None:
     name = raw.strip().strip('".').splitlines()[0].strip() if raw else ""
     if not name or name.lower() in _NAME_STOPWORDS:

@@ -626,6 +626,8 @@ def gather_reasoning_evidence() -> dict:
     cluster_event_ids = collections.defaultdict(list)
     speaker_langs = collections.defaultdict(list)
     speaker_utterance_ids = collections.defaultdict(list)
+    asr_cluster = {}                       # asrEventId -> speaker clusterId
+    asr_attr_name = {}                     # asrEventId -> attributed name (glow)
 
     for event_id in index.by_kind("identity-resolution").get("eventIds", []):
         p = _pointer(event_id)
@@ -648,6 +650,21 @@ def gather_reasoning_evidence() -> dict:
                 if asr and asr["valueKind"] == "asr-segment":
                     speaker_langs[cid].append(_payload(asr).get("langHint", "auto"))
                     speaker_utterance_ids[cid].append(p["parentEventIds"][0])
+                    asr_cluster[p["parentEventIds"][0]] = cid
+
+    # Screen-glow attributions name the utterance they parent; join to the
+    # audio speaker cluster through that shared asr-segment.
+    for event_id in index.by_kind("speaker-attribution").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p or not p.get("parentEventIds"):
+            continue
+        asr_attr_name[p["parentEventIds"][0]] = {"eventId": event_id, "name": _payload(p).get("attributedName", "")}
+
+    speaker_names = collections.defaultdict(list)   # clusterId -> [{eventId,name}]
+    for asr_id, cid in asr_cluster.items():
+        hit = asr_attr_name.get(asr_id)
+        if hit and hit["name"]:
+            speaker_names[cid].append(hit)
 
     return {
         "resolutions": resolutions,
@@ -655,6 +672,7 @@ def gather_reasoning_evidence() -> dict:
         "cluster_event_ids": cluster_event_ids,
         "speaker_langs": speaker_langs,
         "speaker_utterance_ids": speaker_utterance_ids,
+        "speaker_names": speaker_names,
         "roster": load_roster(),
     }
 
@@ -812,6 +830,172 @@ def resolve_names_endpoint(sessionId: str, authorization: str | None = Header(No
     """Queue on-screen name resolution for a session's face clusters."""
     check_auth(authorization)
     resolve_queue.put(sessionId)
+    return {"ok": True, "queued": sessionId}
+
+
+# --- Speaker attribution from the meeting screen (cameras-off calls) ---------
+
+def load_tiles(session_id: str) -> list:
+    """Normalized [x1,y1,x2,y2] tile boxes for a session's meeting grid, in the
+    reference frame's coordinates. Prior geometry (set via POST /tiles), like
+    the roster is prior vocabulary — the attribution itself is automatic."""
+    for name in (f"tiles-{session_id}.json", "tiles.json"):
+        try:
+            with open(DATA_ROOT / name) as f:
+                data = json.load(f)
+            tiles = data.get("tiles", data) if isinstance(data, dict) else data
+            return [[float(v) for v in box] for box in tiles]
+        except Exception:
+            continue
+    return []
+
+
+def attribute_speakers(session_id: str) -> dict:
+    """Attribute each utterance to the meeting tile glowing during it, name the
+    tiles by reading their captions (roster-snapped), and emit a
+    speaker-attribution derivation event per utterance, parented to its
+    asr-segment. Enhancement (homography registration) + glow live in
+    attribute.py; here we gather the trace, name tiles, and record the result."""
+    import attribute as attribution
+
+    tiles_norm = load_tiles(session_id)
+    if not tiles_norm:
+        return {"ok": False, "reason": "no tile geometry set for session (POST /tiles)"}
+
+    frames = []
+    utterances = []
+    for event_id in index.by_kind("scene-change").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p or _payload(p).get("sessionId") != session_id or not p.get("outputArtifactIds"):
+            continue
+        frames.append((_payload(p).get("tNanos", 0), da.get_bytes(p["outputArtifactIds"][0])))
+    for event_id in index.by_kind("asr-segment").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p or _payload(p).get("sessionId") != session_id:
+            continue
+        pl = _payload(p)
+        t0 = pl.get("tStartNanos", pl.get("tNanos", 0))
+        utterances.append((event_id, t0, pl.get("tEndNanos", t0)))
+    frames.sort()
+
+    result = attribution.attribute_session(frames, utterances, tiles_norm)
+
+    # Name each tile by reading its sharpest few caption crops and voting over
+    # roster-snapped reads — a single read misreads surnames (same as faces).
+    import collections
+
+    roster = load_roster()
+    tile_names = {}
+    for idx, cap_list in result["tileCaptions"].items():
+        snapped_votes: "collections.Counter[str]" = collections.Counter()
+        raw_votes: "collections.Counter[str]" = collections.Counter()
+        for cap_jpeg in cap_list:
+            try:
+                raw = enrichment.read_caption_name(cap_jpeg)
+            except Exception as exc:  # noqa: BLE001
+                print(f"tile {idx} caption read failed: {exc}", flush=True)
+                continue
+            if not raw:
+                continue
+            raw_votes[raw] += 1
+            snapped = reasoning.snap_to_roster(raw, roster)[0]
+            if snapped:
+                snapped_votes[snapped] += 1
+        if snapped_votes:
+            tile_names[idx] = snapped_votes.most_common(1)[0][0]
+        elif raw_votes:
+            tile_names[idx] = raw_votes.most_common(1)[0][0]
+        else:
+            tile_names[idx] = f"tile-{idx}"
+
+    emitted = 0
+    for asr_event_id, attr in result["attributions"].items():
+        asr = _pointer(asr_event_id)
+        if not asr:
+            continue
+        apl = _payload(asr)
+        idx = attr["tileIndex"]
+        with ingest_lock:
+            ingest_or_skip_duplicate(
+                raw_payload={
+                    "kind": "raw-payload",
+                    "schema": "perception-speaker-attribution-v0.1",
+                    "sessionId": session_id,
+                    "tileIndex": idx,
+                    "attributedName": tile_names.get(idx, f"tile-{idx}"),
+                    "method": "active-speaker-glow",
+                    "glowVotes": attr["votes"],
+                    "glowFrames": attr["frames"],
+                    "marginMean": attr["marginMean"],
+                    "text": apl.get("text", ""),
+                    "observedAt": apl.get("observedAt", "2026-01-01T00:00:00Z"),
+                },
+                observed_at=apl.get("observedAt", "2026-01-01T00:00:00Z"),
+                actor_path=["server", "percept-memory", "speaker-attributor"],
+                channel_path=asr["channelPath"],
+                value_kind="speaker-attribution",
+                preview=f"{tile_names.get(idx)} : {apl.get('text','')[:60]}",
+                provenance={
+                    "source": "percept-memory-server",
+                    "observedBy": "percept-memory",
+                    "ingestionPipeline": "event-trace-v0",
+                    "extractionRunId": "active-speaker-glow+homography@percept-memory",
+                },
+                parent_event_ids=[asr_event_id],
+                root_event_id=asr["rootEventId"],
+                input_event_ids=[asr_event_id],
+            )
+        emitted += 1
+
+    return {
+        "ok": True,
+        "registered": result["registered"],
+        "medianInliers": result["medianInliers"],
+        "tileNames": tile_names,
+        "attributed": emitted,
+    }
+
+
+attribute_queue: "queue.Queue[str]" = queue.Queue()
+
+
+def attribute_worker() -> None:
+    while True:
+        session_id = attribute_queue.get()
+        try:
+            out = attribute_speakers(session_id)
+            print(f"attributed speakers for {session_id}: {out}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"speaker attribution failed for {session_id}: {exc}", flush=True)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=attribute_worker, daemon=True, name="attribute").start()
+
+
+@app.get("/tiles")
+def get_tiles(sessionId: str, authorization: str | None = Header(None)) -> dict:
+    check_auth(authorization)
+    return {"ok": True, "tiles": load_tiles(sessionId)}
+
+
+@app.post("/tiles")
+async def set_tiles(sessionId: str, request: Request, authorization: str | None = Header(None)) -> dict:
+    """Set the meeting-grid tile boxes for a session, normalized [x1,y1,x2,y2]
+    in [0,1] of the reference frame. Body: {"tiles": [[...],...]} or a bare list."""
+    check_auth(authorization)
+    body = await request.json()
+    tiles = body.get("tiles", []) if isinstance(body, dict) else body
+    with open(DATA_ROOT / f"tiles-{sessionId}.json", "w") as f:
+        json.dump({"tiles": tiles}, f)
+    return {"ok": True, "count": len(tiles)}
+
+
+@app.post("/attribute-speakers")
+def attribute_speakers_endpoint(sessionId: str, authorization: str | None = Header(None)) -> dict:
+    """Queue meeting-screen speaker attribution for a session."""
+    check_auth(authorization)
+    attribute_queue.put(sessionId)
     return {"ok": True, "queued": sessionId}
 
 
