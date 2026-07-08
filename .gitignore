@@ -8,3 +8,7 @@ local.properties
 .android-sdk/
 reference/event-trace-memory/
 captures/
+
+# Python bytecode (generated)
+__pycache__/
+*.pyc
