@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir \
     pillow==11.0.0
 
 WORKDIR /app
-COPY app.py enrich.py identity.py /app/
+COPY app.py enrich.py identity.py reason.py /app/
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

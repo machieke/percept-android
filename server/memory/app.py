@@ -25,6 +25,7 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request
 
 import enrich as enrichment
+import reason as reasoning
 from identity import IdentityRegistry
 
 sys.path.insert(0, os.environ.get("REFERENCE_PATH", "/opt/event-trace-memory"))
@@ -601,6 +602,129 @@ def enrich_backfill(
             enrich_queue.put((event_id, bool(force)))
             queued += 1
     return {"ok": True, "queued": queued}
+
+
+def gather_reasoning_evidence() -> dict:
+    """Scan the trace once into the aggregates the reasoners consume."""
+    import collections
+
+    resolutions = collections.defaultdict(list)
+    cluster_sessions = collections.defaultdict(set)
+    cluster_event_ids = collections.defaultdict(list)
+    speaker_langs = collections.defaultdict(list)
+    speaker_utterance_ids = collections.defaultdict(list)
+
+    for event_id in index.by_kind("identity-resolution").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        pl = _payload(p)
+        resolutions[pl["clusterId"]].append({"eventId": event_id, "name": pl.get("resolvedName", "")})
+
+    for kind in ("face-observation", "speaker-observation"):
+        for event_id in index.by_kind(kind).get("eventIds", []):
+            p = _pointer(event_id)
+            if not p:
+                continue
+            pl = _payload(p)
+            cid = pl["clusterId"]
+            cluster_sessions[cid].add(pl["sessionId"])
+            cluster_event_ids[cid].append(event_id)
+            if kind == "speaker-observation" and p.get("parentEventIds"):
+                asr = _pointer(p["parentEventIds"][0])
+                if asr and asr["valueKind"] == "asr-segment":
+                    speaker_langs[cid].append(_payload(asr).get("langHint", "auto"))
+                    speaker_utterance_ids[cid].append(p["parentEventIds"][0])
+
+    return {
+        "resolutions": resolutions,
+        "cluster_sessions": cluster_sessions,
+        "cluster_event_ids": cluster_event_ids,
+        "speaker_langs": speaker_langs,
+        "speaker_utterance_ids": speaker_utterance_ids,
+    }
+
+
+def emit_conclusion(reasoner_id: str, conclusion: dict) -> str | None:
+    now = "2026-01-01T00:00:00Z"
+    for cid in conclusion["evidenceEventIds"]:
+        p = _pointer(cid)
+        if p:
+            now = _payload(p).get("observedAt", now)
+            break
+    payload = {
+        "kind": "raw-payload",
+        "schema": "reasoning-conclusion-v0.1",
+        "subjectKind": conclusion["subjectKind"],
+        "subjectId": conclusion["subjectId"],
+        "predicate": conclusion["predicate"],
+        "object": conclusion["object"],
+        "frequencyPerMille": conclusion["frequencyPerMille"],
+        "confidencePerMille": conclusion["confidencePerMille"],
+        "positiveEvidence": conclusion["positiveEvidence"],
+        "totalEvidence": conclusion["totalEvidence"],
+        "statement": conclusion["statement"],
+        "observedAt": now,
+    }
+    with ingest_lock:
+        ingested = ingest_or_skip_duplicate(
+            raw_payload=payload,
+            observed_at=now,
+            actor_path=["server", "percept-memory", "reasoner", reasoner_id],
+            channel_path=["reasoning", reasoner_id, conclusion["predicate"]],
+            value_kind="conclusion",
+            preview=conclusion["statement"][:160],
+            provenance={
+                "source": "percept-memory-server",
+                "observedBy": "percept-memory",
+                "ingestionPipeline": "event-trace-v0",
+                "extractionRunId": f"{reasoner_id}@percept-reasoner",
+            },
+            # Conclusions are causally grounded in their evidence but span
+            # sessions, so they self-root (rootEventId = own eventId).
+            parent_event_ids=conclusion["evidenceEventIds"][:32],
+            input_event_ids=conclusion["evidenceEventIds"][:32],
+        )
+    return ingested.event_id if ingested else None
+
+
+@app.post("/reason")
+def reason_endpoint(authorization: str | None = Header(None)) -> dict:
+    """Run every reasoner over the current trace and emit conclusion events.
+    Idempotent by content address: an unchanged conclusion deduplicates, a
+    changed truth value lands as a new revisable conclusion."""
+    check_auth(authorization)
+    evidence = gather_reasoning_evidence()
+    emitted = []
+    for reasoner_id, conclusion in reasoning.run_all(evidence):
+        event_id = emit_conclusion(reasoner_id, conclusion)
+        emitted.append(
+            {
+                "statement": conclusion["statement"],
+                "freq": conclusion["frequencyPerMille"],
+                "conf": conclusion["confidencePerMille"],
+                "new": event_id is not None,
+            }
+        )
+    return {"ok": True, "conclusions": emitted}
+
+
+@app.get("/conclusions")
+def list_conclusions(authorization: str | None = Header(None)) -> dict:
+    """The trace's current conclusions, newest truth per (subject,predicate)."""
+    check_auth(authorization)
+    latest = {}
+    for event_id in index.by_kind("conclusion").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        pl = _payload(p)
+        latest[(pl["subjectId"], pl["predicate"], pl["object"])] = {
+            "statement": pl["statement"],
+            "frequencyPerMille": pl["frequencyPerMille"],
+            "confidencePerMille": pl["confidencePerMille"],
+        }
+    return {"ok": True, "conclusions": list(latest.values())}
 
 
 @app.get("/identities")
