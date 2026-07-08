@@ -27,8 +27,9 @@ class LiveEventStreamer(
     endpointUrl: String,
     private val bearerToken: String? = null,
     private val connectTimeoutMillis: Int = 2_000,
-    private val readTimeoutMillis: Int = 10_000,
+    private val readTimeoutMillis: Int = 4_000,
     capacity: Int = DEFAULT_CAPACITY,
+    private val circuitBreakAfter: Int = DEFAULT_CIRCUIT_BREAK_AFTER,
     private val onError: ((String) -> Unit)? = null,
 ) {
     data class StreamedEvent(
@@ -52,6 +53,14 @@ class LiveEventStreamer(
 
     @Volatile
     private var errorReported = false
+
+    // Once the endpoint has failed this many times in a row, stop attempting
+    // POSTs for the rest of this streamer's life — a mall walk queued ~1700
+    // events and each one otherwise burned a full timeout against a dead
+    // endpoint (~10 min of radio). Undelivered events stay PENDING → bundles.
+    @Volatile
+    private var circuitOpen = false
+    private var consecutiveFailures = 0
 
     fun start(scope: CoroutineScope) {
         check(senderJob == null) { "streamer already started" }
@@ -89,6 +98,13 @@ class LiveEventStreamer(
         StreamerStats(streamed.get(), failed.get(), dropped.get())
 
     private fun send(event: StreamedEvent) {
+        // Endpoint declared dead: skip the POST entirely. The event stays
+        // PENDING (only success ACKs) and bundle backfill delivers it, so
+        // draining a large queue against a down endpoint is instant.
+        if (circuitOpen) {
+            dropped.incrementAndGet()
+            return
+        }
         try {
             val objects = JSONObject()
             for (cid in event.objectCids) {
@@ -124,16 +140,22 @@ class LiveEventStreamer(
 
             index.updateDispatchState(listOf(event.eventId), DispatchState.ACKED)
             streamed.incrementAndGet()
+            consecutiveFailures = 0
         } catch (t: Exception) {
             failed.incrementAndGet()
+            consecutiveFailures += 1
             if (!errorReported) {
                 errorReported = true
                 onError?.invoke("live stream failing (${t.message}); bundles will backfill")
+            }
+            if (consecutiveFailures >= circuitBreakAfter) {
+                circuitOpen = true
             }
         }
     }
 
     companion object {
         const val DEFAULT_CAPACITY: Int = 128
+        const val DEFAULT_CIRCUIT_BREAK_AFTER: Int = 3
     }
 }
