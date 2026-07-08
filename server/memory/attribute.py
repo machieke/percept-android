@@ -122,18 +122,16 @@ def attribute_session(frames: list, utterances: list, tiles_norm: list) -> dict:
         warped = cv2.warpPerspective(img, Hmat, (W, H))
         inliers_all.append(inl)
         glow_by_time.append((t, {i: _ring_luminance(warped, tiles[i]) for i in range(len(tiles))}))
-        wgray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        # Because every frame is warped to the SAME reference geometry, each
+        # tile's caption region is pixel-aligned across frames — so we can stack
+        # them (multi-frame super-resolution). Handheld frames could not be
+        # stacked before registration (they smeared); registered, they denoise
+        # into one clean, legible caption.
         for i, tile in enumerate(tiles):
             cx1, cy1, cx2, cy2 = _caption_box(tile)
-            crop = wgray[max(0, cy1):cy2, max(0, cx1):cx2]
-            if crop.size == 0:
-                continue
-            s = _sharpness_gray(crop.astype(np.float64))
-            lst = best_caption[i]
-            lst.append((s, warped[max(0, cy1):cy2, max(0, cx1):cx2]))
-            if len(lst) > 16:  # keep memory bounded: retain the sharpest 8
-                lst.sort(key=lambda t: -t[0])
-                del lst[8:]
+            crop = warped[max(0, cy1):cy2, max(0, cx1):cx2]
+            if crop.size:
+                best_caption[i].append(crop)
 
     if not glow_by_time:
         return {"attributions": {}, "tileCaptions": {}, "registered": 0, "medianInliers": 0, "tiles": tiles}
@@ -171,18 +169,19 @@ def attribute_session(frames: list, utterances: list, tiles_norm: list) -> dict:
             "marginMean": round(float(np.mean(margins)), 2),
         }
 
-    # Encode the sharpest few caption crops per tile for the caller to read+vote.
-    captions_per_tile = 4
+    # Median-stack each tile's aligned caption crops into one denoised,
+    # super-resolved caption image for the caller to read once. Median is robust
+    # to the frames where a tile warped partly off-screen (black outliers).
     tile_captions = {}
-    for i, lst in best_caption.items():
-        lst.sort(key=lambda t: -t[0])
-        crops = []
-        for _, cap in lst[:captions_per_tile]:
-            if cap is not None and cap.size:
-                ok, buf = cv2.imencode(".jpg", cap, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                if ok:
-                    crops.append(buf.tobytes())
-        tile_captions[i] = crops
+    for i, crops in best_caption.items():
+        # All crops share the fixed caption box in reference coordinates.
+        same = [c for c in crops if crops and c.shape == crops[0].shape]
+        if len(same) < 3:
+            tile_captions[i] = []
+            continue
+        stacked = np.median(np.stack(same, 0), 0).astype(np.uint8)
+        ok, buf = cv2.imencode(".jpg", stacked, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        tile_captions[i] = [buf.tobytes()] if ok else []
 
     return {
         "attributions": attributions,
