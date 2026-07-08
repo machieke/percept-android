@@ -295,6 +295,11 @@ private fun CaptureSettingsSection(settings: PerceptSettings, enabled: Boolean) 
         { settings.minTrackDurationMs },
         { settings.minTrackDurationMs = it },
     )
+    numberField(
+        "Video resolution (long edge px) — higher = legible on-screen text, more CPU",
+        { settings.videoResolution },
+        { settings.videoResolution = it },
+    )
 }
 
 /** Bundle zips live in app-scoped storage other apps cannot browse; a share

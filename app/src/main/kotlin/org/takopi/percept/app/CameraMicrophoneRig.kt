@@ -110,9 +110,12 @@ class CameraMicrophoneRig(
             this.analyzer = analyzer
             val executor = Executors.newSingleThreadExecutor()
             analysisExecutor = executor
+            // Long edge from settings; keyframes are encoded at this size, so
+            // higher values make on-screen text legible to VLM reads.
+            val longEdge = settings.videoResolution
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setTargetResolution(Size(640, 480))
+                .setTargetResolution(Size(longEdge, longEdge * 3 / 4))
                 .build()
                 .also { it.setAnalyzer(executor, analyzer) }
             val providerFuture = ProcessCameraProvider.getInstance(context)

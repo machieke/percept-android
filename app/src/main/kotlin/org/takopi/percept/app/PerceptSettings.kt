@@ -54,6 +54,16 @@ class PerceptSettings(context: Context) {
         get() = prefs.getInt("minTrackDurationMs", DEFAULT_MIN_TRACK_MS)
         set(value) = prefs.edit().putInt("minTrackDurationMs", value.coerceIn(0, 60_000)).apply()
 
+    /**
+     * Camera analysis resolution (long edge, px). Keyframes are encoded from
+     * this frame, so higher values make on-screen text legible to server-side
+     * VLM reads at the cost of more per-frame CPU. Detector input is always
+     * letterboxed to 320 regardless.
+     */
+    var videoResolution: Int
+        get() = prefs.getInt("videoResolution", DEFAULT_VIDEO_RESOLUTION)
+        set(value) = prefs.edit().putInt("videoResolution", value.coerceIn(480, 2160)).apply()
+
     private inner class BoolPref(private val key: String) {
         operator fun getValue(thisRef: Any?, property: kotlin.reflect.KProperty<*>): Boolean =
             prefs.getBoolean(key, true)
@@ -71,6 +81,7 @@ class PerceptSettings(context: Context) {
         const val DEFAULT_SCENE_COOLDOWN_S = 2
         const val DEFAULT_KEYFRAME_QUALITY = 70
         const val DEFAULT_MIN_TRACK_MS = 0
+        const val DEFAULT_VIDEO_RESOLUTION = 720
 
         fun defaultDeviceId(model: String = Build.MODEL ?: "android-device"): String =
             model.lowercase()
