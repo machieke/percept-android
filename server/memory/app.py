@@ -319,7 +319,7 @@ def identify_chunk(chunk_event_id: str, force: bool = False) -> None:
                 )
 
 
-def resolve_names(session_id: str, max_reads_per_cluster: int = 5) -> dict:
+def resolve_names(session_id: str, max_reads_per_cluster: int = 5, candidate_pool: int = 60) -> dict:
     """Read on-screen name labels (video-call tiles, name tags) for the face
     clusters seen in a session, emit identity-resolution derivation events
     parented to the face-observations, and project the majority reading into
@@ -343,12 +343,14 @@ def resolve_names(session_id: str, max_reads_per_cluster: int = 5) -> dict:
 
     resolved: dict[str, str] = {}
     for cluster_id, observations in per_cluster.items():
+        # SELECT the sharpest caption crops to read. Most of a cluster's frames
+        # are motion-blurred and only a few carry a legible name; reading the
+        # highest-detScore frames wastes VLM calls on blurry labels. So bound the
+        # pool by detection richness, score each candidate's caption sharpness,
+        # and read the sharpest few. Decode each keyframe once, reuse for the read.
         observations.sort(key=lambda o: -o[1].get("detScorePermille", 0))
-        votes: "collections.Counter[str]" = collections.Counter()
-        reads = 0
-        for obs, opl in observations:
-            if reads >= max_reads_per_cluster:
-                break
+        scored: list[tuple[float, dict, dict, bytes]] = []
+        for obs, opl in observations[:candidate_pool]:
             # The keyframe is the face-observation's parent scene-change artifact.
             scene = _pointer(obs["parentEventIds"][0]) if obs.get("parentEventIds") else None
             if not scene or not scene.get("outputArtifactIds"):
@@ -360,11 +362,21 @@ def resolve_names(session_id: str, max_reads_per_cluster: int = 5) -> dict:
             if already:
                 continue
             try:
-                name = enrichment.read_name_label(da.get_bytes(scene["outputArtifactIds"][0]), opl["box"])
+                jpeg = da.get_bytes(scene["outputArtifactIds"][0])
+                sharp = enrichment.caption_sharpness(jpeg, opl["box"])
+            except Exception as exc:  # noqa: BLE001 - selection is best-effort
+                print(f"sharpness failed for {obs['eventId']}: {exc}", flush=True)
+                continue
+            scored.append((sharp, obs, opl, jpeg))
+        scored.sort(key=lambda t: -t[0])
+
+        votes: "collections.Counter[str]" = collections.Counter()
+        for sharp, obs, opl, jpeg in scored[:max_reads_per_cluster]:
+            try:
+                name = enrichment.read_name_label(jpeg, opl["box"])
             except Exception as exc:  # noqa: BLE001 - resolution is best-effort
                 print(f"name read failed for {obs['eventId']}: {exc}", flush=True)
                 continue
-            reads += 1
             confidence = 700 if name else 0
             with ingest_lock:
                 ingest_or_skip_duplicate(
@@ -376,6 +388,7 @@ def resolve_names(session_id: str, max_reads_per_cluster: int = 5) -> dict:
                         "resolvedName": name or "",
                         "method": "on-screen-label",
                         "confidencePermille": confidence,
+                        "captionSharpness": round(sharp),
                         "box": opl["box"],
                         "tNanos": opl["tNanos"],
                         "observedAt": opl["observedAt"],
@@ -642,7 +655,20 @@ def gather_reasoning_evidence() -> dict:
         "cluster_event_ids": cluster_event_ids,
         "speaker_langs": speaker_langs,
         "speaker_utterance_ids": speaker_utterance_ids,
+        "roster": load_roster(),
     }
+
+
+def load_roster() -> list:
+    """Known-contact names the reasoner may resolve reads to. Prior vocabulary,
+    not per-cluster labels — the reasoner still deduces which cluster is whom."""
+    try:
+        with open(DATA_ROOT / "roster.json") as f:
+            data = json.load(f)
+        names = data.get("names", data) if isinstance(data, dict) else data
+        return [str(n) for n in names if str(n).strip()]
+    except Exception:
+        return []
 
 
 def emit_conclusion(reasoner_id: str, conclusion: dict) -> str | None:
@@ -707,6 +733,25 @@ def reason_endpoint(authorization: str | None = Header(None)) -> dict:
             }
         )
     return {"ok": True, "conclusions": emitted}
+
+
+@app.get("/roster")
+def get_roster(authorization: str | None = Header(None)) -> dict:
+    check_auth(authorization)
+    return {"ok": True, "names": load_roster()}
+
+
+@app.post("/roster")
+async def set_roster(request: Request, authorization: str | None = Header(None)) -> dict:
+    """Set the known-contact roster the reasoner snaps noisy name reads to.
+    Body: {"names": [...]} or a bare JSON list. Persisted on the data volume."""
+    check_auth(authorization)
+    body = await request.json()
+    names = body.get("names", []) if isinstance(body, dict) else body
+    names = [str(n).strip() for n in names if str(n).strip()]
+    with open(DATA_ROOT / "roster.json", "w") as f:
+        json.dump({"names": names}, f)
+    return {"ok": True, "count": len(names)}
 
 
 @app.get("/conclusions")

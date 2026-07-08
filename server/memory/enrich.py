@@ -85,15 +85,13 @@ NAME_PROMPT = (
 _NAME_STOPWORDS = {"none", "name", "unknown", "n/a", "the", "person", "unclear"}
 
 
-def read_name_label(jpeg: bytes, box: list[int]) -> str | None:
-    """Crop the region around a detected face — widened and extended downward
-    to capture the name label that video-call tiles / name tags place beneath
-    the face — and read it with the VLM. Returns a cleaned name or None."""
-    import io
-
+def _caption_crop(image, box: list[int]):
+    """The name-label region for a face box: widened left/right and extended
+    downward, where video-call tiles and name tags print the name. Small crops
+    are upscaled — labels are only ~12 px tall in a 720 px keyframe, below VLM
+    legibility without magnification."""
     from PIL import Image
 
-    image = Image.open(io.BytesIO(jpeg))
     width, height = image.size
     x1, y1, x2, y2 = box
     w, h = max(1, x2 - x1), max(1, y2 - y1)
@@ -105,13 +103,39 @@ def read_name_label(jpeg: bytes, box: list[int]) -> str | None:
             min(height, y2 + int(h * 2.2)),
         )
     )
-    buffer = io.BytesIO()
-    # Upscale small crops — video-call name labels are only ~12 px tall in a
-    # 720 px keyframe, below the VLM's legibility without magnification.
     if crop.width < 320:
         scale = 320 / crop.width
         crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS)
-    crop.convert("RGB").save(buffer, format="JPEG", quality=95)
+    return crop.convert("RGB")
+
+
+def caption_sharpness(jpeg: bytes, box: list[int]) -> float:
+    """Edge energy of the caption region — high when the on-screen name is
+    crisp, low when motion-blurred. A face cluster has hundreds of frames, most
+    blurred but a few legible, so the resolver SELECTS the sharpest to read
+    rather than averaging them: multi-frame fusion smears a moving on-screen
+    subject, and order statistics (pick the sharpest) beat the mean here."""
+    import io
+
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    crop = _caption_crop(Image.open(io.BytesIO(jpeg)), box)
+    edges = np.asarray(crop.filter(ImageFilter.FIND_EDGES).convert("L"), dtype="float32")
+    return float(edges.var())
+
+
+def read_name_label(jpeg: bytes, box: list[int]) -> str | None:
+    """Crop the name-label region around a detected face and read it with the
+    VLM. Returns a cleaned name or None. The VLM reads the first name reliably
+    but hallucinates surnames off low-res labels; roster-snapping in the
+    reasoner repairs that downstream, so this stays a pure raw read."""
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    _caption_crop(Image.open(io.BytesIO(jpeg)), box).save(buffer, format="JPEG", quality=95)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     # One retry: a single bad frame 500s ollama and otherwise stalls the pass.
     for attempt in range(2):
