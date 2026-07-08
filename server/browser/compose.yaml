@@ -1,0 +1,19 @@
+services:
+  percept-browser:
+    build: .
+    container_name: percept-browser
+    # Read-only view of the memory server's data volume — the browser can never
+    # mutate the trace, only read pointers.jsonl and the content-addressed store.
+    volumes:
+      - percept-memory-data:/data:ro
+    environment:
+      - DATA_ROOT=/data
+    ports:
+      - "8131:8131"
+    restart: unless-stopped
+
+volumes:
+  # Created by server/memory/compose.yaml (project "memory").
+  percept-memory-data:
+    external: true
+    name: memory_percept-memory-data

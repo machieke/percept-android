@@ -1,0 +1,337 @@
+"""Percept trace browser — a read-only window into the episodic memory.
+
+Mounts the memory server's data volume read-only and serves a small single-page
+app to explore exactly what was traced and how it links: sessions, the
+interleaved cross-modal timeline of each session, and per-event detail with the
+resolved payload, attached artifacts (keyframes/audio), and the causal graph
+(parents / children / root) as clickable links. Nothing here can mutate the
+trace — it only reads pointers.jsonl and the content-addressed objects.
+"""
+
+import json
+import os
+from functools import lru_cache
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+
+DATA_ROOT = Path(os.environ.get("DATA_ROOT", "/data"))
+POINTER_LOG = DATA_ROOT / "pointers.jsonl"
+OBJECTS = DATA_ROOT / "da" / "objects"
+
+app = FastAPI(title="percept-trace-browser")
+
+_state: dict = {"mtime": None, "pointers": [], "by_id": {}, "children": {}}
+
+
+def _digest(cid: str) -> str:
+    return cid.rsplit(":", 1)[-1]
+
+
+@lru_cache(maxsize=8192)
+def _payload_cached(digest: str) -> str:
+    try:
+        return (OBJECTS / digest).read_text()
+    except Exception:
+        return "{}"
+
+
+def payload_of(pointer: dict) -> dict:
+    try:
+        return json.loads(_payload_cached(_digest(pointer["payloadCid"])))
+    except Exception:
+        return {}
+
+
+def load() -> None:
+    """(Re)load pointers if the log changed — cheap live refresh."""
+    try:
+        mtime = POINTER_LOG.stat().st_mtime
+    except FileNotFoundError:
+        _state.update(mtime=None, pointers=[], by_id={}, children={})
+        return
+    if _state["mtime"] == mtime:
+        return
+    pointers, by_id, children = [], {}, {}
+    with POINTER_LOG.open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            p = json.loads(line)
+            pointers.append(p)
+            by_id[p["eventId"]] = p
+            for parent in p.get("parentEventIds", []):
+                children.setdefault(parent, []).append(p["eventId"])
+    _state.update(mtime=mtime, pointers=pointers, by_id=by_id, children=children)
+
+
+def session_of(p: dict) -> str:
+    cp = p.get("channelPath") or []
+    if cp and cp[0] == "perception" and len(cp) >= 2:
+        return cp[1]
+    if cp and cp[0] == "reasoning":
+        return "(reasoning)"
+    return "(other)"
+
+
+def modality_of(p: dict) -> str:
+    cp = p.get("channelPath") or []
+    if cp and cp[0] == "reasoning":
+        return "reasoning"
+    return cp[2] if len(cp) >= 3 else "session"
+
+
+def t_nanos(pl: dict) -> int:
+    for k in ("tStartNanos", "tNanos", "tEndNanos"):
+        if k in pl and isinstance(pl[k], int):
+            return pl[k]
+    return 0
+
+
+def preview_of(p: dict, pl: dict) -> str:
+    for k in ("text", "statement", "attributedName", "resolvedName", "label",
+              "clusterId", "vehicleType", "ssid", "caption"):
+        v = pl.get(k)
+        if v:
+            return f"{v}"
+    kind = p.get("valueKind", "?")
+    if "latE7" in pl and "lonE7" in pl:
+        return f"({pl['latE7'] / 1e7:.5f}, {pl['lonE7'] / 1e7:.5f})"
+    return kind
+
+
+def actor_short(p: dict) -> str:
+    ap = p.get("actorPath") or []
+    if not ap:
+        return "?"
+    if ap[0] == "device":
+        return ap[2] if len(ap) > 2 else "device"  # camera / microphone / app / sensors
+    return ap[-1]  # server producers: asr / llm / vlm / speaker-id / reasoner / ...
+
+
+@app.get("/api/sessions")
+def api_sessions() -> JSONResponse:
+    load()
+    agg: dict = {}
+    for p in _state["pointers"]:
+        sid = session_of(p)
+        a = agg.setdefault(sid, {"sid": sid, "events": 0, "kinds": {}, "t0": None, "t1": None})
+        a["events"] += 1
+        a["kinds"][p.get("valueKind", "?")] = a["kinds"].get(p.get("valueKind", "?"), 0) + 1
+        tp = p.get("timePath")
+        if tp:
+            key = tuple(tp)
+            a["t0"] = min(a["t0"], key) if a["t0"] else key
+            a["t1"] = max(a["t1"], key) if a["t1"] else key
+    out = []
+    for a in agg.values():
+        a["t0"] = "-".join(str(x) for x in a["t0"]) if a["t0"] else ""
+        a.pop("t1", None)
+        out.append(a)
+    out.sort(key=lambda a: a["sid"])
+    return JSONResponse(out)
+
+
+@app.get("/api/session/{sid}")
+def api_session(sid: str) -> JSONResponse:
+    load()
+    rows = []
+    for p in _state["pointers"]:
+        if session_of(p) != sid:
+            continue
+        pl = payload_of(p)
+        rows.append({
+            "id": p["eventId"],
+            "kind": p.get("valueKind", "?"),
+            "modality": modality_of(p),
+            "actor": actor_short(p),
+            "t": t_nanos(pl),
+            "preview": preview_of(p, pl)[:120],
+            "artifacts": len(p.get("outputArtifactIds") or []),
+            "nParents": len(p.get("parentEventIds") or []),
+            "nChildren": len(_state["children"].get(p["eventId"], [])),
+        })
+    t0 = min((r["t"] for r in rows if r["t"]), default=0)
+    for r in rows:
+        r["rel"] = round((r["t"] - t0) / 1e9, 1) if r["t"] else None
+    rows.sort(key=lambda r: (r["t"] == 0, r["t"]))
+    return JSONResponse({"sid": sid, "events": rows})
+
+
+def _brief(event_id: str) -> dict:
+    p = _state["by_id"].get(event_id)
+    if not p:
+        return {"id": event_id, "kind": "(missing)", "preview": ""}
+    pl = payload_of(p)
+    return {"id": event_id, "kind": p.get("valueKind", "?"), "actor": actor_short(p),
+            "preview": preview_of(p, pl)[:100]}
+
+
+@app.get("/api/event/{event_id}")
+def api_event(event_id: str) -> JSONResponse:
+    load()
+    p = _state["by_id"].get(event_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="unknown event")
+    return JSONResponse({
+        "id": event_id,
+        "kind": p.get("valueKind", "?"),
+        "session": session_of(p),
+        "actorPath": p.get("actorPath"),
+        "channelPath": p.get("channelPath"),
+        "schema": payload_of(p).get("schema"),
+        "payload": payload_of(p),
+        "artifacts": p.get("outputArtifactIds") or [],
+        "root": p.get("rootEventId"),
+        "parents": [_brief(x) for x in (p.get("parentEventIds") or [])],
+        "children": [_brief(x) for x in _state["children"].get(event_id, [])],
+    })
+
+
+@app.get("/api/artifact/{cid:path}")
+def api_artifact(cid: str) -> Response:
+    path = OBJECTS / _digest(cid)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="unknown artifact")
+    data = path.read_bytes()
+    ctype = "application/octet-stream"
+    if data[:3] == b"\xff\xd8\xff":
+        ctype = "image/jpeg"
+    elif data[:4] == b"OggS":
+        ctype = "audio/ogg"
+    elif data[:4] == b"\x89PNG":
+        ctype = "image/png"
+    return Response(content=data, media_type=ctype)
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    return INDEX_HTML
+
+
+INDEX_HTML = r"""<!doctype html><html><head><meta charset=utf-8>
+<title>percept trace browser</title>
+<style>
+ :root{--bg:#0d1117;--panel:#161b22;--bd:#30363d;--fg:#c9d1d9;--mut:#8b949e;--acc:#58a6ff;--warn:#d29922;--good:#3fb950;--der:#bc8cff}
+ *{box-sizing:border-box} body{margin:0;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column}
+ header{padding:8px 12px;border-bottom:1px solid var(--bd);display:flex;gap:12px;align-items:center}
+ header b{color:var(--acc)} header .mut{color:var(--mut)}
+ main{flex:1;display:grid;grid-template-columns:230px 1fr 1.1fr;min-height:0}
+ .col{overflow:auto;border-right:1px solid var(--bd);padding:6px}
+ .s{padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent}
+ .s:hover{background:var(--panel)} .s.sel{background:var(--panel);border-color:var(--acc)}
+ .s .sid{color:var(--fg)} .s .meta{color:var(--mut);font-size:11px}
+ .filters{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}
+ .chip{font-size:11px;padding:1px 7px;border:1px solid var(--bd);border-radius:10px;color:var(--mut);cursor:pointer}
+ .chip.on{background:var(--acc);color:#0d1117;border-color:var(--acc)}
+ .ev{display:grid;grid-template-columns:52px 130px 1fr auto;gap:8px;padding:3px 6px;border-radius:5px;cursor:pointer;align-items:baseline}
+ .ev:hover{background:var(--panel)} .ev.sel{background:#1f2630}
+ .ev .t{color:var(--mut);text-align:right} .ev .k{color:var(--acc)} .ev .p{color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .ev .b{color:var(--mut);font-size:11px}
+ .k.derived{color:var(--der)} .k.reasoning{color:var(--warn)}
+ .badge{font-size:10px;color:var(--mut)}
+ h3{margin:6px 0 4px;color:var(--acc);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+ .kv{display:grid;grid-template-columns:120px 1fr;gap:2px 10px} .kv .k{color:var(--mut)}
+ .lnk{color:var(--acc);cursor:pointer;text-decoration:underline dotted} .lnk:hover{color:#79c0ff}
+ pre{background:#0a0e14;border:1px solid var(--bd);border-radius:6px;padding:8px;overflow:auto;max-height:340px}
+ img.kf{max-width:100%;border:1px solid var(--bd);border-radius:6px;margin-top:6px}
+ .rel{color:var(--mut)} .cnt{color:var(--good)}
+ .link-row{padding:3px 6px;border-radius:5px;cursor:pointer} .link-row:hover{background:var(--panel)}
+ .empty{color:var(--mut);padding:20px;text-align:center}
+</style></head><body>
+<header><b>percept</b> trace browser <span class=mut id=stat></span>
+ <span style="margin-left:auto" class=mut>causal: <span class=lnk>parent</span> · child · <span style="color:var(--der)">derived</span> · <span style="color:var(--warn)">conclusion</span></span>
+</header>
+<main>
+ <div class=col id=sessions></div>
+ <div class=col id=events><div class=empty>select a session</div></div>
+ <div class=col id=detail><div class=empty>select an event</div></div>
+</main>
+<script>
+const $=(s,e=document)=>e.querySelector(s), el=(h)=>{const d=document.createElement('div');d.innerHTML=h;return d.firstElementChild};
+const DERIVED=new Set(['identity-resolution','transcript-correction','speaker-observation','face-observation','vehicle-observation','scene-caption','speaker-attribution']);
+let curSession=null, curEvents=[], activeKinds=null, curEvent=null;
+
+async function j(u){const r=await fetch(u);return r.json()}
+function kclass(k){return k==='conclusion'?'reasoning':(DERIVED.has(k)?'derived':'')}
+
+async function loadSessions(){
+ const ss=await j('/api/sessions'); const box=$('#sessions'); box.innerHTML='';
+ let total=0; ss.forEach(s=>total+=s.events);
+ $('#stat').textContent=`· ${ss.length} sessions · ${total} events`;
+ ss.forEach(s=>{
+  const kinds=Object.entries(s.kinds).sort((a,b)=>b[1]-a[1]).slice(0,3).map(x=>x[0]).join(', ');
+  const d=el(`<div class=s><div class=sid>${s.sid}</div><div class=meta>${s.events} events · ${s.t0}</div><div class=meta>${kinds}</div></div>`);
+  d.onclick=()=>{document.querySelectorAll('.s').forEach(x=>x.classList.remove('sel'));d.classList.add('sel');openSession(s.sid)};
+  box.appendChild(d);
+ });
+}
+async function openSession(sid){
+ curSession=sid; activeKinds=null;
+ const r=await j('/api/session/'+encodeURIComponent(sid)); curEvents=r.events;
+ renderFilters(); renderEvents();
+}
+function renderFilters(){
+ const kinds=[...new Set(curEvents.map(e=>e.kind))].sort();
+ const f=el('<div class=filters></div>');
+ const all=el(`<span class="chip on">all (${curEvents.length})</span>`); all.onclick=()=>{activeKinds=null;renderFilters();renderEvents()};
+ f.appendChild(all);
+ kinds.forEach(k=>{
+  const n=curEvents.filter(e=>e.kind===k).length;
+  const c=el(`<span class="chip ${activeKinds&&activeKinds.has(k)?'on':''}">${k} ${n}</span>`);
+  c.onclick=()=>{activeKinds=activeKinds||new Set(); activeKinds.has(k)?activeKinds.delete(k):activeKinds.add(k); if(!activeKinds.size)activeKinds=null; renderFilters();renderEvents()};
+  f.appendChild(c);
+ });
+ const box=$('#events'); box.innerHTML=''; box.appendChild(f);
+}
+function renderEvents(){
+ const box=$('#events');
+ [...box.querySelectorAll('.ev')].forEach(x=>x.remove());
+ const rows=curEvents.filter(e=>!activeKinds||activeKinds.has(e.kind));
+ rows.forEach(e=>{
+  const rel=e.rel==null?'':(e.rel+'s');
+  const badge=(e.artifacts?'🖼 ':'')+(e.nChildren?`<span class=cnt>▸${e.nChildren}</span>`:'');
+  const d=el(`<div class=ev><span class=t>${rel}</span><span class="k ${kclass(e.kind)}">${e.kind}</span><span class=p>${escape(e.preview)}</span><span class=b>${badge}</span></div>`);
+  d.onclick=()=>{document.querySelectorAll('.ev').forEach(x=>x.classList.remove('sel'));d.classList.add('sel');openEvent(e.id)};
+  box.appendChild(d);
+ });
+}
+function escape(s){return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}
+async function openEvent(id){
+ curEvent=id; const e=await j('/api/event/'+encodeURIComponent(id)); const D=$('#detail'); D.innerHTML='';
+ D.appendChild(el(`<div><span class="k ${kclass(e.kind)}" style="font-size:15px">${e.kind}</span> <span class=mut>${e.schema||''}</span></div>`));
+ D.appendChild(el(`<div class=kv>
+   <span class=k>actor</span><span>${(e.actorPath||[]).join(' / ')}</span>
+   <span class=k>channel</span><span>${(e.channelPath||[]).join(' / ')}</span>
+   <span class=k>eventId</span><span class=mut>${e.id}</span></div>`));
+ // causal graph
+ const g=el('<div></div>'); g.appendChild(el('<h3>causal links</h3>'));
+ const root=el(`<div class=link-row>root: <span class=lnk>${e.root||'—'}</span></div>`);
+ if(e.root&&e.root!==e.id) root.querySelector('.lnk').onclick=()=>openEvent(e.root); else root.querySelector('.lnk').style.color='var(--mut)';
+ g.appendChild(root);
+ addLinks(g,'parents ▲',e.parents); addLinks(g,'children ▼',e.children);
+ D.appendChild(g);
+ // artifacts
+ if(e.artifacts.length){
+  const a=el('<div></div>'); a.appendChild(el('<h3>artifacts</h3>'));
+  e.artifacts.forEach(cid=>{ a.appendChild(el(`<img class=kf src="/api/artifact/${cid}" onerror="this.replaceWith(el('<div class=mut>'+cid+' (not an image)</div>'))">`)); });
+  D.appendChild(a);
+ }
+ // payload
+ D.appendChild(el('<h3>payload</h3>'));
+ D.appendChild(el(`<pre>${escape(JSON.stringify(e.payload,null,2))}</pre>`));
+}
+function addLinks(g,title,list){
+ g.appendChild(el(`<h3 style="margin-top:8px">${title} (${list.length})</h3>`));
+ if(!list.length){g.appendChild(el('<div class=mut style="padding-left:6px">none</div>'));return}
+ list.forEach(x=>{
+  const r=el(`<div class=link-row><span class="k ${kclass(x.kind)}">${x.kind}</span> <span class=lnk>${escape(x.preview||x.id.slice(0,18))}</span></div>`);
+  r.onclick=()=>openEvent(x.id); g.appendChild(r);
+ });
+}
+window.el=el;
+loadSessions();
+setInterval(loadSessions, 15000);
+</script></body></html>"""
