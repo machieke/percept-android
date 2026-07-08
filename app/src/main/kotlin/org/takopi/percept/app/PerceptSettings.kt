@@ -78,7 +78,7 @@ class PerceptSettings(context: Context) {
         private const val KEY_TOKEN = "bearerToken"
         private const val KEY_ASR_ENDPOINT = "asrEndpointUrl"
         private const val KEY_DEVICE_ID = "deviceId"
-        const val DEFAULT_SCENE_COOLDOWN_S = 3
+        const val DEFAULT_SCENE_COOLDOWN_S = 1
         const val DEFAULT_KEYFRAME_QUALITY = 80
         const val DEFAULT_MIN_TRACK_MS = 0
         const val DEFAULT_VIDEO_RESOLUTION = 1080
