@@ -636,7 +636,7 @@ def gather_reasoning_evidence() -> dict:
         pl = _payload(p)
         resolutions[pl["clusterId"]].append({"eventId": event_id, "name": pl.get("resolvedName", "")})
 
-    for kind in ("face-observation", "speaker-observation"):
+    for kind in ("face-observation", "speaker-observation", "vehicle-observation"):
         for event_id in index.by_kind(kind).get("eventIds", []):
             p = _pointer(event_id)
             if not p:
@@ -996,6 +996,120 @@ def attribute_speakers_endpoint(sessionId: str, authorization: str | None = Head
     """Queue meeting-screen speaker attribution for a session."""
     check_auth(authorization)
     attribute_queue.put(sessionId)
+    return {"ok": True, "queued": sessionId}
+
+
+# --- Vehicle re-identification (the automotive analog of face/voice id) ------
+
+def identify_vehicles(session_id: str, min_box_px: int = 56) -> dict:
+    """Cluster vehicles by appearance so a car can be recognized across
+    appearances and sessions. The on-device tracker already gives each vehicle a
+    trackId + a box over its lifetime; where a stored keyframe falls inside that
+    lifetime we interpolate the box, crop the vehicle out of the keyframe pixels,
+    embed its appearance (vehicle.appearance_embedding), and assign it to a
+    persistent cluster — emitting a vehicle-observation parented to the track.
+    The recurrence reasoner then surfaces vehicles that recur across sessions."""
+    import cv2
+    import numpy as np
+
+    import vehicle as veh
+
+    frames = []
+    for event_id in index.by_kind("scene-change").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p or _payload(p).get("sessionId") != session_id or not p.get("outputArtifactIds"):
+            continue
+        frames.append((_payload(p).get("tNanos", 0), p["outputArtifactIds"][0]))
+
+    tracks = []
+    for event_id in index.by_kind("track-segment").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        pl = _payload(p)
+        if pl.get("sessionId") != session_id or pl.get("label") not in ("car", "truck", "bus"):
+            continue
+        tracks.append((pl["tStartNanos"], pl["tEndNanos"], pl["boxFirst"], pl["boxLast"],
+                       pl["label"], pl.get("trackId"), p))
+
+    emitted = 0
+    clusters_seen: "set[str]" = set()
+    for t_frame, artifact_id in frames:
+        overlapping = [t for t in tracks if t[0] <= t_frame <= t[1]]
+        if not overlapping:
+            continue
+        img = cv2.imdecode(np.frombuffer(da.get_bytes(artifact_id), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        H, W = img.shape[:2]
+        for t0, t1, bf, bl, label, track_id, tp in overlapping:
+            box = veh.interpolate_box(t_frame, t0, t1, bf, bl)
+            x1, y1, x2, y2 = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+            if min(x2 - x1, y2 - y1) < min_box_px:
+                continue
+            crop = img[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+            embedding = veh.appearance_embedding(crop)
+            if not embedding:
+                continue
+            cluster_id, similarity = identities.assign("vehicle", embedding)
+            clusters_seen.add(cluster_id)
+            tpl = _payload(tp)
+            with ingest_lock:
+                if ingest_or_skip_duplicate(
+                    raw_payload={
+                        "kind": "raw-payload",
+                        "schema": "perception-vehicle-v0.1",
+                        "sessionId": session_id,
+                        "clusterId": cluster_id,
+                        "similarityPermille": similarity,
+                        "vehicleType": label,
+                        "trackId": track_id,
+                        "box": [x1, y1, x2, y2],
+                        "tNanos": t_frame,
+                        "observedAt": tpl.get("observedAt", "2026-01-01T00:00:00Z"),
+                    },
+                    observed_at=tpl.get("observedAt", "2026-01-01T00:00:00Z"),
+                    actor_path=["server", "percept-memory", "vehicle-id"],
+                    channel_path=[tp["channelPath"][0], tp["channelPath"][1], "identity"],
+                    value_kind="vehicle-observation",
+                    preview=f"{cluster_id} ({label})",
+                    provenance={
+                        "source": "percept-memory-server",
+                        "observedBy": "percept-memory",
+                        "ingestionPipeline": "event-trace-v0",
+                        "extractionRunId": "vehicle-appearance-v0@percept-memory",
+                    },
+                    parent_event_ids=[tp["eventId"]],
+                    root_event_id=tp["rootEventId"],
+                    input_event_ids=[tp["eventId"]],
+                ):
+                    emitted += 1
+
+    return {"ok": True, "observations": emitted, "clusters": len(clusters_seen)}
+
+
+vehicle_queue: "queue.Queue[str]" = queue.Queue()
+
+
+def vehicle_worker() -> None:
+    while True:
+        session_id = vehicle_queue.get()
+        try:
+            out = identify_vehicles(session_id)
+            print(f"identified vehicles for {session_id}: {out}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"vehicle identification failed for {session_id}: {exc}", flush=True)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=vehicle_worker, daemon=True, name="vehicle").start()
+
+
+@app.post("/identify-vehicles")
+def identify_vehicles_endpoint(sessionId: str, authorization: str | None = Header(None)) -> dict:
+    """Queue vehicle re-identification for a session's tracked cars/trucks/buses."""
+    check_auth(authorization)
+    vehicle_queue.put(sessionId)
     return {"ok": True, "queued": sessionId}
 
 

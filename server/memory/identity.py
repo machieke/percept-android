@@ -17,20 +17,27 @@ import numpy as np
 
 SPEAKER_SIM_THRESHOLD = float(os.environ.get("SPEAKER_SIM_THRESHOLD", "0.50"))
 FACE_SIM_THRESHOLD = float(os.environ.get("FACE_SIM_THRESHOLD", "0.45"))
+VEHICLE_SIM_THRESHOLD = float(os.environ.get("VEHICLE_SIM_THRESHOLD", "0.985"))
+
+_THRESHOLDS = {
+    "speaker": SPEAKER_SIM_THRESHOLD,
+    "face": FACE_SIM_THRESHOLD,
+    "vehicle": VEHICLE_SIM_THRESHOLD,
+}
 
 
 class IdentityRegistry:
     def __init__(self, path: Path):
         self.path = path
         self.lock = threading.Lock()
-        self.data: dict = {"speaker": {}, "face": {}}
+        self.data: dict = {"speaker": {}, "face": {}, "vehicle": {}}
         if path.exists():
             self.data = json.loads(path.read_text())
-            for kind in ("speaker", "face"):
+            for kind in ("speaker", "face", "vehicle"):
                 self.data.setdefault(kind, {})
 
     def _threshold(self, kind: str) -> float:
-        return SPEAKER_SIM_THRESHOLD if kind == "speaker" else FACE_SIM_THRESHOLD
+        return _THRESHOLDS.get(kind, FACE_SIM_THRESHOLD)
 
     def assign(self, kind: str, embedding: list[float]) -> tuple[str, int]:
         """Returns (clusterId, similarityPermille vs its centroid)."""
@@ -39,7 +46,7 @@ class IdentityRegistry:
         if norm > 0:
             vector = vector / norm
         with self.lock:
-            clusters = self.data[kind]
+            clusters = self.data.setdefault(kind, {})
             best_id, best_sim = None, -1.0
             for cluster_id, cluster in clusters.items():
                 centroid = np.asarray(cluster["centroid"], dtype=np.float32)
@@ -64,7 +71,7 @@ class IdentityRegistry:
         only sets/replaces a label that is absent or itself model-derived, and
         only when at least as confident."""
         with self.lock:
-            for kind in ("speaker", "face"):
+            for kind in self.data:
                 cluster = self.data[kind].get(cluster_id)
                 if cluster is None:
                     continue
@@ -85,7 +92,7 @@ class IdentityRegistry:
         return False
 
     def label_of(self, cluster_id: str) -> str | None:
-        for kind in ("speaker", "face"):
+        for kind in self.data:
             cluster = self.data[kind].get(cluster_id)
             if cluster:
                 return cluster.get("label")
