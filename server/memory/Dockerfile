@@ -13,7 +13,8 @@ RUN git clone https://github.com/machieke/event-trace-memory /opt/event-trace-me
 RUN pip install --no-cache-dir \
     fastapi==0.115.6 \
     "uvicorn[standard]==0.34.0" \
-    numpy==2.2.6
+    numpy==2.2.6 \
+    pillow==11.0.0
 
 WORKDIR /app
 COPY app.py enrich.py identity.py /app/

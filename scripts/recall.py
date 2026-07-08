@@ -36,6 +36,14 @@ class Store:
         self.objects = self.root / "da" / "objects"
         self.pointers: list[dict] = []
         self.by_id: dict[str, dict] = {}
+        self.labels: dict[str, str] = {}
+        registry = self.root / "identities.json"
+        if registry.exists():
+            reg = json.loads(registry.read_text())
+            for kind in ("speaker", "face"):
+                for cid, c in reg.get(kind, {}).items():
+                    if c.get("label"):
+                        self.labels[cid] = c["label"]
         with (self.root / "pointers.jsonl").open() as log:
             for line in log:
                 line = line.strip()
@@ -133,13 +141,15 @@ def cmd_speech_where(store: Store, args) -> None:
 
 
 def cmd_speakers(store: Store, args) -> None:
-    """Utterances with the speaker cluster attributed to each (via causal parent)."""
+    """Utterances with the speaker cluster attributed to each (via causal parent).
+    Cluster ids resolve to names through the identity registry."""
     for obs in sorted(store.rows(session=args.session, kind="speaker-observation"), key=store.t_seconds):
         opl = store.payload(obs)
         parent = store.by_id.get(obs["parentEventIds"][0]) if obs.get("parentEventIds") else None
         text = store.payload(parent)["text"][:55] if parent else "?"
-        who = opl.get("label") or opl["clusterId"]
-        print(f'{who:12} sim={opl["similarityPermille"]:4}  "{text}"')
+        cid = opl["clusterId"]
+        who = store.labels.get(cid, cid)
+        print(f'{who:16} ({cid})  sim={opl["similarityPermille"]:4}  "{text}"')
 
 
 COMMANDS = {

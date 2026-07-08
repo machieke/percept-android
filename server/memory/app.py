@@ -318,6 +318,93 @@ def identify_chunk(chunk_event_id: str, force: bool = False) -> None:
                 )
 
 
+def resolve_names(session_id: str, max_reads_per_cluster: int = 5) -> dict:
+    """Read on-screen name labels (video-call tiles, name tags) for the face
+    clusters seen in a session, emit identity-resolution derivation events
+    parented to the face-observations, and project the majority reading into
+    the registry (human labels are never overwritten).
+
+    A resolution is a proposal recorded in the trace with its model and
+    confidence — competing/wrong reads coexist and are out-voted, never
+    erased."""
+    import collections
+
+    # Gather face-observations per cluster, richest detections first.
+    per_cluster: dict[str, list[tuple[dict, dict]]] = collections.defaultdict(list)
+    for event_id in index.by_kind("face-observation").get("eventIds", []):
+        obs = _pointer(event_id)
+        if not obs:
+            continue
+        opl = _payload(obs)
+        if opl.get("sessionId") != session_id:
+            continue
+        per_cluster[opl["clusterId"]].append((obs, opl))
+
+    resolved: dict[str, str] = {}
+    for cluster_id, observations in per_cluster.items():
+        observations.sort(key=lambda o: -o[1].get("detScorePermille", 0))
+        votes: "collections.Counter[str]" = collections.Counter()
+        reads = 0
+        for obs, opl in observations:
+            if reads >= max_reads_per_cluster:
+                break
+            # The keyframe is the face-observation's parent scene-change artifact.
+            scene = _pointer(obs["parentEventIds"][0]) if obs.get("parentEventIds") else None
+            if not scene or not scene.get("outputArtifactIds"):
+                continue
+            already = any(
+                (child := _pointer(cid)) and child["valueKind"] == "identity-resolution"
+                for cid in index.by_parent(obs["eventId"]).get("eventIds", [])
+            )
+            if already:
+                continue
+            try:
+                name = enrichment.read_name_label(da.get_bytes(scene["outputArtifactIds"][0]), opl["box"])
+            except Exception as exc:  # noqa: BLE001 - resolution is best-effort
+                print(f"name read failed for {obs['eventId']}: {exc}", flush=True)
+                continue
+            reads += 1
+            confidence = 700 if name else 0
+            with ingest_lock:
+                ingest_or_skip_duplicate(
+                    raw_payload={
+                        "kind": "raw-payload",
+                        "schema": "perception-identity-resolution-v0.1",
+                        "sessionId": session_id,
+                        "clusterId": cluster_id,
+                        "resolvedName": name or "",
+                        "method": "on-screen-label",
+                        "confidencePermille": confidence,
+                        "box": opl["box"],
+                        "tNanos": opl["tNanos"],
+                        "observedAt": opl["observedAt"],
+                    },
+                    observed_at=opl["observedAt"],
+                    actor_path=["server", "percept-memory", "identity-resolver"],
+                    channel_path=obs["channelPath"],
+                    value_kind="identity-resolution",
+                    preview=f"{cluster_id} -> {name or 'NONE'}",
+                    provenance={
+                        "source": "percept-memory-server",
+                        "observedBy": "percept-memory",
+                        "ingestionPipeline": "event-trace-v0",
+                        "extractionRunId": f"{enrichment.VLM_MODEL}+name-label@ollama",
+                    },
+                    parent_event_ids=[obs["eventId"]],
+                    root_event_id=obs["rootEventId"],
+                    input_event_ids=[obs["eventId"]],
+                )
+            if name:
+                votes[name] += 1
+        if votes:
+            winner, count = votes.most_common(1)[0]
+            # Confidence scales with corroboration across keyframes.
+            conf = min(950, 600 + count * 100)
+            if identities.label(cluster_id, winner, method="on-screen-label", confidence=conf):
+                resolved[cluster_id] = winner
+    return resolved
+
+
 def enrich_chunk(chunk_event_id: str) -> None:
     """Caption keyframes around one audio chunk and LLM-correct its archival
     asr segments using that visual context. Runs on the enrichment worker;
@@ -519,11 +606,36 @@ def list_identities(authorization: str | None = Header(None)) -> dict:
 def label_identity(clusterId: str, name: str, authorization: str | None = Header(None)) -> dict:
     """Attach a human name to a speaker/face cluster (applies prospectively;
     past events keep their pseudonymous clusterId, resolvable via the
-    registry)."""
+    registry). A human label always outranks model resolutions."""
     check_auth(authorization)
-    if not identities.label(clusterId, name):
+    if not identities.label(clusterId, name, method="human"):
         raise HTTPException(status_code=404, detail=f"unknown cluster: {clusterId}")
     return {"ok": True, "clusterId": clusterId, "label": name}
+
+
+resolve_queue: "queue.Queue[str]" = queue.Queue()
+
+
+def resolve_worker() -> None:
+    while True:
+        session_id = resolve_queue.get()
+        try:
+            resolved = resolve_names(session_id)
+            print(f"resolved names for {session_id}: {resolved}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"name resolution failed for {session_id}: {exc}", flush=True)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=resolve_worker, daemon=True, name="resolve").start()
+
+
+@app.post("/resolve-names")
+def resolve_names_endpoint(sessionId: str, authorization: str | None = Header(None)) -> dict:
+    """Queue on-screen name resolution for a session's face clusters."""
+    check_auth(authorization)
+    resolve_queue.put(sessionId)
+    return {"ok": True, "queued": sessionId}
 
 
 @app.post("/retranscribe")

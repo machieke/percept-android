@@ -59,13 +59,29 @@ class IdentityRegistry:
             self._save()
             return new_id, 1000
 
-    def label(self, cluster_id: str, name: str) -> bool:
+    def label(self, cluster_id: str, name: str, method: str = "human", confidence: int = 1000) -> bool:
+        """Set a cluster's label. Human labels always win; a model resolution
+        only sets/replaces a label that is absent or itself model-derived, and
+        only when at least as confident."""
         with self.lock:
             for kind in ("speaker", "face"):
-                if cluster_id in self.data[kind]:
-                    self.data[kind][cluster_id]["label"] = name
-                    self._save()
-                    return True
+                cluster = self.data[kind].get(cluster_id)
+                if cluster is None:
+                    continue
+                existing_method = cluster.get("labelMethod")
+                if existing_method == "human" and method != "human":
+                    return False
+                if (
+                    method != "human"
+                    and cluster.get("label")
+                    and confidence < cluster.get("labelConfidence", 0)
+                ):
+                    return False
+                cluster["label"] = name
+                cluster["labelMethod"] = method
+                cluster["labelConfidence"] = confidence
+                self._save()
+                return True
         return False
 
     def label_of(self, cluster_id: str) -> str | None:
@@ -78,7 +94,11 @@ class IdentityRegistry:
     def summary(self) -> dict:
         return {
             kind: {
-                cluster_id: {"count": c["count"], "label": c.get("label")}
+                cluster_id: {
+                    "count": c["count"],
+                    "label": c.get("label"),
+                    "labelMethod": c.get("labelMethod"),
+                }
                 for cluster_id, c in clusters.items()
             }
             for kind, clusters in self.data.items()

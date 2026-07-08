@@ -75,6 +75,56 @@ def caption_keyframe(jpeg: bytes) -> str:
     return _generate(VLM_MODEL, CAPTION_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
 
 
+NAME_PROMPT = (
+    "This is a crop from a video-call grid or a scene with a visible name "
+    "label (e.g. a video-call participant tile, a name tag, or a badge). "
+    "Read the person's name printed near the face. Reply with ONLY the name "
+    "exactly as written, or the single word NONE if no name text is legible."
+)
+
+_NAME_STOPWORDS = {"none", "name", "unknown", "n/a", "the", "person", "unclear"}
+
+
+def read_name_label(jpeg: bytes, box: list[int]) -> str | None:
+    """Crop the region around a detected face — widened and extended downward
+    to capture the name label that video-call tiles / name tags place beneath
+    the face — and read it with the VLM. Returns a cleaned name or None."""
+    import io
+
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(jpeg))
+    width, height = image.size
+    x1, y1, x2, y2 = box
+    w, h = max(1, x2 - x1), max(1, y2 - y1)
+    crop = image.crop(
+        (
+            max(0, x1 - int(w * 2.5)),
+            max(0, y1 - int(h * 0.3)),
+            min(width, x2 + int(w * 2.5)),
+            min(height, y2 + int(h * 2.2)),
+        )
+    )
+    buffer = io.BytesIO()
+    crop.convert("RGB").save(buffer, format="JPEG")
+    raw = _generate(VLM_MODEL, NAME_PROMPT, images=[base64.b64encode(buffer.getvalue()).decode("ascii")])
+    return _clean_name(raw)
+
+
+def _clean_name(raw: str) -> str | None:
+    name = raw.strip().strip('".').splitlines()[0].strip() if raw else ""
+    if not name or name.lower() in _NAME_STOPWORDS:
+        return None
+    # A plausible on-screen name: 1-4 words, mostly letters, not a sentence.
+    words = name.split()
+    if not (1 <= len(words) <= 4):
+        return None
+    letters = sum(c.isalpha() for c in name)
+    if letters < max(2, len(name) - 3):
+        return None
+    return " ".join(w.capitalize() for w in words)
+
+
 def _replaced_word_pairs(original: str, corrected: str) -> list[tuple[str, str]]:
     import difflib
 
