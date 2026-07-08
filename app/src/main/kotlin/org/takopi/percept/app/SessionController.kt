@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.takopi.percept.core.da.FileDA
+import org.takopi.percept.core.index.DispatchState
 import org.takopi.percept.core.index.EventPointerDatabase
 import org.takopi.percept.core.index.RoomEventIndex
 import org.takopi.percept.core.trace.IngestedEvent
@@ -61,6 +62,8 @@ data class SessionUiState(
     val lastExportPath: String? = null,
     val lastUploadStatus: String? = null,
     val lastError: String? = null,
+    /** Events not yet acknowledged by the server, across all sessions. */
+    val pendingEvents: Int = 0,
 )
 
 /**
@@ -271,6 +274,7 @@ class SessionController(
             it.copy(stopping = false, eventsDropped = activeSession.stats().eventsDropped)
         }
         scheduleBackgroundUploadIfConfigured()
+        refreshPendingCount()
     }
 
     private fun scheduleBackgroundUploadIfConfigured() {
@@ -308,6 +312,72 @@ class SessionController(
             )
             stateFlow.update { it.copy(lastExportPath = result.zipPath.toString()) }
             result
+        }
+    }
+
+    /** Count of events across all sessions the server has not yet acked. */
+    fun refreshPendingCount() {
+        scope.launch {
+            val pending = withContext(Dispatchers.IO) {
+                index.eventsByDispatchState(DispatchState.PENDING).size +
+                    index.eventsByDispatchState(DispatchState.BUNDLED).size
+            }
+            stateFlow.update { it.copy(pendingEvents = pending) }
+        }
+    }
+
+    /**
+     * Upload every session that still has unacked events, not just the last
+     * one — a session recorded on a dead network stays PENDING and must be
+     * reachable from the manual sync, not only the hourly sweeper.
+     */
+    suspend fun uploadAllPending(): Int {
+        val endpoint = settings.endpointUrl
+        if (endpoint.isBlank()) {
+            stateFlow.update { it.copy(lastUploadStatus = "no endpoint configured") }
+            return 0
+        }
+        return withContext(Dispatchers.IO) {
+            val sessionIds = (
+                index.eventsByDispatchState(DispatchState.PENDING) +
+                    index.eventsByDispatchState(DispatchState.BUNDLED)
+                )
+                .mapNotNull { BundleUploadWorker.sessionIdFromChannelPath(it.channelPath) }
+                .distinct()
+            var acked = 0
+            var failures = 0
+            for (sessionId in sessionIds) {
+                val sequence = nextSequence()
+                val result = coordinator.exportAndUploadPending(
+                    BundleDispatchRequest(
+                        sessionId = sessionId,
+                        sequence = sequence,
+                        sourceDaRoot = daRoot,
+                        outputRoot = exportRoot(),
+                    ),
+                    BundleUploadDestination(
+                        url = URL(endpoint.trimEnd('/') + "/bundles/" + "$sessionId-$sequence"),
+                        bearerToken = settings.bearerToken.ifBlank { null },
+                    ),
+                )
+                acked += result.ackedEvents
+                if (result.upload?.ok == false) failures += 1
+            }
+            if (acked > 0) {
+                val candidates = DaRetentionCandidateCollector(index).collect(daRoot)
+                val plan = RetentionPlanner().planEviction(candidates, capBytes = retentionCapBytes)
+                FileRetentionEvictor().evict(plan.evict)
+            }
+            val pending = index.eventsByDispatchState(DispatchState.PENDING).size +
+                index.eventsByDispatchState(DispatchState.BUNDLED).size
+            stateFlow.update {
+                it.copy(
+                    pendingEvents = pending,
+                    lastUploadStatus = "synced ${sessionIds.size} session(s), acked $acked" +
+                        if (failures > 0) ", $failures failed" else "",
+                )
+            }
+            acked
         }
     }
 

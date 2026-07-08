@@ -54,6 +54,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         permissionsGranted = hasRequiredPermissions()
         val controller = PerceptRuntime.controller(this)
+        controller.refreshPendingCount()
         val settings = PerceptSettings(this)
         setContent {
             MaterialTheme {
@@ -149,7 +150,8 @@ private fun SessionScreen(
         }
 
         Text(
-            text = "events ${state.eventsIngested} · dropped ${state.eventsDropped}",
+            text = "events ${state.eventsIngested} · dropped ${state.eventsDropped}" +
+                if (state.pendingEvents > 0) " · ${state.pendingEvents} awaiting sync" else " · synced",
             style = MaterialTheme.typography.bodyMedium,
         )
 
@@ -162,9 +164,11 @@ private fun SessionScreen(
                 onClick = { scope.launch { controller.exportLastSessionBundle() } },
             ) { Text("Export bundle") }
             OutlinedButton(
-                enabled = !state.running && (state.lastSessionId != null),
-                onClick = { scope.launch { controller.exportAndUpload() } },
-            ) { Text("Upload") }
+                enabled = !state.running,
+                onClick = { scope.launch { controller.uploadAllPending() } },
+            ) {
+                Text(if (state.pendingEvents > 0) "Sync (${state.pendingEvents})" else "Sync")
+            }
         }
         (state.lastExportPath ?: controller.latestBundleZipPath())?.let { path ->
             Text(text = "bundle: $path", style = MaterialTheme.typography.bodySmall)
