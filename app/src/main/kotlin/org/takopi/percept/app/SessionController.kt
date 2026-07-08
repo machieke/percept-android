@@ -50,6 +50,9 @@ data class TickerEntry(
 
 data class SessionUiState(
     val running: Boolean = false,
+    /** Teardown in progress: recording has ended but the rig is still
+     *  releasing the camera, so a new session must not start yet. */
+    val stopping: Boolean = false,
     val sessionId: String? = null,
     val lastSessionId: String? = null,
     val eventsIngested: Long = 0,
@@ -131,6 +134,9 @@ class SessionController(
     fun startSessionAndWait(rig: PerceptionRig) {
         synchronized(this) {
             check(session == null && !starting) { "session already running" }
+            // Refuse to start while a previous session's rig is still
+            // releasing the camera, or the two rigs fight over it.
+            check(!stateFlow.value.stopping) { "previous session still stopping" }
             // Reserve the slot before the slow work so double-taps can't race.
             starting = true
         }
@@ -225,9 +231,21 @@ class SessionController(
         }
         val timeBase = synchronized(this) { activeTimeBase }
         if (activeSession == null || activeRig == null) {
-            liveStreamer?.stop()
+            liveStreamer?.close()
             liveStreamer = null
             return
+        }
+        // Flip the UI to stopped immediately: the session is logically over
+        // the moment stop is pressed, and teardown below (rig shutdown, the
+        // session-stop write, streamer drain) can take a while on a flaky
+        // network — it must not freeze the buttons.
+        stateFlow.update {
+            it.copy(
+                running = false,
+                stopping = true,
+                sessionId = null,
+                lastSessionId = it.sessionId ?: it.lastSessionId,
+            )
         }
         // The session-stop event must be written even when capture teardown
         // fails; fall back to zeroed counters and surface the rig error.
@@ -244,16 +262,13 @@ class SessionController(
             )
         }
         activeSession.stop(counters)
-        // session-stop has streamed by now; flush the queue and shut down.
-        liveStreamer?.stop()
+        // Close the streamer only after session-stop is ingested, so it too
+        // streams; close is non-blocking — undelivered events stay PENDING
+        // for bundle backfill and drain in the background.
+        liveStreamer?.close()
         liveStreamer = null
         stateFlow.update {
-            it.copy(
-                running = false,
-                sessionId = null,
-                lastSessionId = it.sessionId ?: it.lastSessionId,
-                eventsDropped = activeSession.stats().eventsDropped,
-            )
+            it.copy(stopping = false, eventsDropped = activeSession.stats().eventsDropped)
         }
         scheduleBackgroundUploadIfConfigured()
     }

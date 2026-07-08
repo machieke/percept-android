@@ -70,10 +70,19 @@ class LiveEventStreamer(
         return accepted
     }
 
-    /** Closes the stream and waits for queued events to flush. */
+    /** Closes the stream and waits for queued events to flush (tests). */
     suspend fun stop() {
         channel.close()
         senderJob?.join()
+    }
+
+    /**
+     * Non-blocking shutdown: close the channel and let the sender drain what
+     * is queued in the background, then exit. Undelivered events remain
+     * PENDING for bundle backfill — stop must never block on the network.
+     */
+    fun close() {
+        channel.close()
     }
 
     fun stats(): StreamerStats =

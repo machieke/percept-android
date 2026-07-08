@@ -269,6 +269,12 @@ class SessionControllerTest {
             ),
         )
         controller.stopSessionAndWait()
+        // The streamer drains in the background (stop no longer blocks on the
+        // network), so wait for delivery before asserting.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (received.size < 3 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50)
+        }
         server.close()
         acceptor.join(2_000)
 

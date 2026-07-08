@@ -137,10 +137,13 @@ private fun SessionScreen(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Button(onClick = onStart, enabled = !state.running) { Text("Start") }
+            Button(onClick = onStart, enabled = !state.running && !state.stopping) { Text("Start") }
             Button(onClick = onStop, enabled = state.running) { Text("Stop") }
             Text(
-                text = state.sessionId ?: state.lastSessionId ?: "no session",
+                text = when {
+                    state.stopping -> "stopping…"
+                    else -> state.sessionId ?: state.lastSessionId ?: "no session"
+                },
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
