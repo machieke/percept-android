@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 RUN pip install --no-cache-dir \
     fastapi==0.115.6 \
-    "uvicorn[standard]==0.34.0"
+    "uvicorn[standard]==0.34.0" \
+    pillow==11.0.0
 
 WORKDIR /app
 COPY app.py /app/

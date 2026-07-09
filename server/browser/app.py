@@ -337,6 +337,71 @@ def api_cluster(cid: str) -> JSONResponse:
     return JSONResponse({"cluster": cid, "events": rows})
 
 
+@app.get("/api/crop/{event_id}")
+def api_crop(event_id: str) -> Response:
+    """The image fragment an observation refers to: the box cropped from the
+    keyframe it was seen in (face / vehicle), or the whole keyframe when the
+    observation carries no box (open-vocab items). The keyframe is the event's
+    artifact-bearing parent, or the nearest scene-change in the same session."""
+    load()
+    p = _state["by_id"].get(event_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="unknown event")
+    pl = payload_of(p)
+    box = pl.get("box")
+    t = pl.get("tNanos") or pl.get("tStartNanos") or 0
+    session = pl.get("sessionId")
+
+    artifact_cid = None
+    for parent in p.get("parentEventIds", []):
+        pp = _state["by_id"].get(parent)
+        if pp and pp.get("outputArtifactIds"):
+            artifact_cid = pp["outputArtifactIds"][0]
+            break
+    if not artifact_cid:  # e.g. vehicle-observation parents a track, not a keyframe
+        best, best_dt = None, None
+        for q in _state["pointers"]:
+            if q.get("valueKind") != "scene-change" or not q.get("outputArtifactIds"):
+                continue
+            qpl = payload_of(q)
+            if qpl.get("sessionId") != session:
+                continue
+            dt = abs(qpl.get("tNanos", 0) - t)
+            if best_dt is None or dt < best_dt:
+                best, best_dt = q, dt
+        if best:
+            artifact_cid = best["outputArtifactIds"][0]
+    if not artifact_cid:
+        raise HTTPException(status_code=404, detail="no keyframe for event")
+
+    data = (OBJECTS / _digest(artifact_cid)).read_bytes()
+    if not box:
+        return Response(content=data, media_type="image/jpeg")  # whole scene (items)
+
+    import io
+
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(data)).convert("RGB")
+    W, H = im.size
+    x1, y1, x2, y2 = (float(v) for v in box)
+    # Vehicle boxes come from the on-device detector's 640x480 analysis frame,
+    # not the (larger) stored keyframe; scale them up. Face boxes are already in
+    # keyframe pixels (server-side insightface), so they are left as-is.
+    if p.get("valueKind") == "vehicle-observation":
+        sx, sy = W / 640.0, H / 480.0
+        x1, y1, x2, y2 = x1 * sx, y1 * sy, x2 * sx, y2 * sy
+    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+    pw, ph = int((x2 - x1) * 0.2), int((y2 - y1) * 0.2)   # a little context around the box
+    crop = im.crop((max(0, x1 - pw), max(0, y1 - ph), min(W, x2 + pw), min(H, y2 + ph)))
+    if crop.width and crop.width < 240:                   # upscale tiny crops for visibility
+        scale = 240 / crop.width
+        crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS)
+    buf = io.BytesIO()
+    crop.save(buf, format="JPEG", quality=90)
+    return Response(content=buf.getvalue(), media_type="image/jpeg")
+
+
 @app.get("/api/artifact/{cid:path}")
 def api_artifact(cid: str) -> Response:
     path = OBJECTS / _digest(cid)
@@ -471,6 +536,13 @@ async function openEvent(id){
  g.appendChild(root);
  addLinks(g,'parents ▲',e.parents); addLinks(g,'children ▼',e.children);
  D.appendChild(g);
+ // image fragment for observations (the box cropped from its keyframe, or the whole scene for items)
+ if(['face-observation','vehicle-observation','item-observation'].includes(e.kind)){
+  const f=el('<div></div>'); f.appendChild(el('<h3>image fragment</h3>'));
+  const img=el(`<img class=kf src="/api/crop/${encodeURIComponent(e.id)}">`);
+  img.onerror=()=>img.replaceWith(el('<div class=mut>no image fragment</div>'));
+  f.appendChild(img); D.appendChild(f);
+ }
  // artifacts
  if(e.artifacts.length){
   const a=el('<div></div>'); a.appendChild(el('<h3>artifacts</h3>'));
