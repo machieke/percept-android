@@ -399,12 +399,15 @@ function renderEvents(){
  rows.forEach(e=>{
   const rel=e.rel==null?'':(e.rel+'s');
   const badge=(e.artifacts?'🖼 ':'')+(e.nChildren?`<span class=cnt>▸${e.nChildren}</span>`:'');
-  const d=el(`<div class=ev><span class=t>${rel}</span><span class="k ${kclass(e.kind)}">${e.kind}</span><span class=p>${escape(e.preview)}</span><span class=b>${badge}</span></div>`);
+  const pv=e.kind==='location-fix'?mapsLink(e.preview):escape(e.preview);
+  const d=el(`<div class=ev><span class=t>${rel}</span><span class="k ${kclass(e.kind)}">${e.kind}</span><span class=p>${pv}</span><span class=b>${badge}</span></div>`);
   d.onclick=()=>{document.querySelectorAll('.ev').forEach(x=>x.classList.remove('sel'));d.classList.add('sel');openEvent(e.id)};
   box.appendChild(d);
  });
 }
 function escape(s){return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}
+function dms(dec,isLat){const dir=isLat?(dec>=0?'N':'S'):(dec>=0?'E':'W');dec=Math.abs(dec);const d=Math.floor(dec);const mf=(dec-d)*60;const m=Math.floor(mf);const s=((mf-m)*60).toFixed(1);return `${d}°${String(m).padStart(2,'0')}'${s}"${dir}`;}
+function mapsLink(loc){const p=String(loc).replace(/[()\s]/g,'').split(',').map(parseFloat);if(p.length<2||isNaN(p[0])||isNaN(p[1]))return escape(String(loc));return `<a class=lnk target=_blank rel=noopener href="https://www.google.com/maps?q=${p[0]},${p[1]}">${dms(p[0],true)} ${dms(p[1],false)}</a>`;}
 async function openEvent(id){
  curEvent=id; const e=await j('/api/event/'+encodeURIComponent(id)); const D=$('#detail'); D.innerHTML='';
  D.appendChild(el(`<div><span class="k ${kclass(e.kind)}" style="font-size:15px">${e.kind}</span> <span class=mut>${e.schema||''}</span></div>`));
@@ -460,13 +463,14 @@ async function loadEntities(){
 function openEntity(e){
  const M=$('#events'); M.innerHTML='';
  M.appendChild(el(`<div style="font-size:15px;color:var(--acc)">${escape(e.name||e.pseudonym)}</div>`));
- const loc=e.usuallyAt?` · usually-at ${e.usuallyAt.loc} (${e.usuallyAt.fixes} fixes)`:'';
+ const loc=e.usuallyAt?` · usually-at ${mapsLink(e.usuallyAt.loc)} (${e.usuallyAt.fixes} fixes)`:'';
  M.appendChild(el(`<div class=emeta>${e.modalities.join(' / ')} · ${e.sessionCount} sessions${loc}</div>`));
  M.appendChild(el('<h3>members</h3>'));
  e.members.forEach(m=>{
   const names=Object.entries(m.names).sort((a,b)=>b[1]-a[1]);
   const nh=names.map(([n,c])=>`<div class=emeta>${escape(n)} — conf ${c}<div class=bar><i style="width:${c/10}%"></i></div></div>`).join('');
-  const mm=el(`<div class=member><span class="k derived">${m.cluster}</span> <span class=emeta>${m.observations} obs · ${m.sessions.length} sessions</span>${nh?'<div style="margin-top:4px">'+nh+'</div>':''}<div class=lnk style="margin-top:3px">view observations ▸</div></div>`);
+  const ml=m.usuallyAt?`<div class=emeta>usually-at ${mapsLink(m.usuallyAt.loc)}</div>`:'';
+  const mm=el(`<div class=member><span class="k derived">${m.cluster}</span> <span class=emeta>${m.observations} obs · ${m.sessions.length} sessions</span>${nh?'<div style="margin-top:4px">'+nh+'</div>':''}${ml}<div class=lnk style="margin-top:3px">view observations ▸</div></div>`);
   mm.querySelector('.lnk').onclick=()=>openCluster(m.cluster);
   M.appendChild(mm);
  });
