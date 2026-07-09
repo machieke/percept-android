@@ -22,17 +22,26 @@ import re
 
 EVIDENTIAL_HORIZON = 1  # NAL k: one more counterexample would halve certainty growth
 
+# Modalities whose embeddings are proven to over-merge on this capture (phone-mic
+# far-field voices ~0.03 separation; classical vehicle appearance tail overlap).
+# Their recurrence needs far more evidence before it is believed, and an entity
+# built only from them stays low-confidence unless a reliable modality (a face)
+# corroborates it.
+WEAK_MODALITIES = {"speaker", "vehicle"}
+WEAK_HORIZON = 6
+
 # Below this bigram-cosine, a read is a total misread (wrong first name) and is
 # dropped rather than snapped — keeps 'Mr Kennedy' from becoming 'Kyle Klemmer'.
 ROSTER_SNAP_THRESHOLD = int(os.environ.get("ROSTER_SNAP_THRESHOLD_PERMILLE", "300")) / 1000
 
 
-def nal_truth(positive: int, total: int) -> tuple[int, int]:
-    """Return (frequencyPerMille, confidencePerMille)."""
+def nal_truth(positive: int, total: int, horizon: int = EVIDENTIAL_HORIZON) -> tuple[int, int]:
+    """Return (frequencyPerMille, confidencePerMille). A larger horizon demands
+    more evidence for the same confidence — used to distrust weak modalities."""
     if total <= 0:
         return 0, 0
     frequency = round(1000 * positive / total)
-    confidence = round(1000 * total / (total + EVIDENTIAL_HORIZON))
+    confidence = round(1000 * total / (total + horizon))
     return frequency, confidence
 
 
@@ -132,8 +141,11 @@ def recurrence_conclusions(evidence: dict) -> list[dict]:
         n_sessions = len(sessions)
         if n_sessions < 2:
             continue
-        # Treat every session appearance as positive evidence of recurrence.
-        frequency, confidence = nal_truth(n_sessions, n_sessions)
+        # Weak-embedding modalities over-merge, so their apparent recurrence is
+        # untrustworthy — demand far more sessions before it counts as confident.
+        weak = cluster_id.split("-")[0] in WEAK_MODALITIES
+        frequency, confidence = nal_truth(n_sessions, n_sessions, WEAK_HORIZON if weak else EVIDENTIAL_HORIZON)
+        note = " (unverified — weak embedding clusters over-merge)" if weak else ""
         out.append(
             {
                 "subjectKind": cluster_id.split("-")[0],
@@ -144,7 +156,7 @@ def recurrence_conclusions(evidence: dict) -> list[dict]:
                 "confidencePerMille": confidence,
                 "positiveEvidence": n_sessions,
                 "totalEvidence": n_sessions,
-                "statement": f"{cluster_id} is a recurring entity, seen in {n_sessions} sessions",
+                "statement": f"{cluster_id} is a recurring entity, seen in {n_sessions} sessions{note}",
                 "evidenceEventIds": evidence["cluster_event_ids"].get(cluster_id, []),
             }
         )
@@ -238,7 +250,14 @@ def entity_conclusions(evidence: dict) -> list[dict]:
         modalities = sorted({m.split("-")[0] for m in members})
         sessions = set().union(*[cluster_sessions.get(m, set()) for m in members]) if members else set()
         n_sessions = max(1, len(sessions))
-        frequency, confidence = nal_truth(n_sessions, n_sessions)
+        # Corroboration: an entity resting only on weak modalities (voice/vehicle)
+        # stays low-confidence; one a reliable modality (a face) also supports is
+        # trusted — a cross-modal link is what makes recurrence believable.
+        corroborated = any(m not in WEAK_MODALITIES for m in modalities)
+        frequency, confidence = nal_truth(
+            n_sessions, n_sessions, EVIDENTIAL_HORIZON if corroborated else WEAK_HORIZON
+        )
+        note = "" if corroborated else " — uncorroborated (weak-modality only)"
         evidence_ids = [e for m in members for e in cluster_event_ids.get(m, [])[:3]]
         out.append(
             {
@@ -252,7 +271,7 @@ def entity_conclusions(evidence: dict) -> list[dict]:
                 "totalEvidence": len(members),
                 "statement": (
                     f"entity '{name}' = {', '.join(members)} "
-                    f"({'+'.join(modalities)}; {len(sessions)} sessions)"
+                    f"({'+'.join(modalities)}; {len(sessions)} sessions){note}"
                 ),
                 "evidenceEventIds": evidence_ids or [f"cluster:{m}" for m in members],
             }

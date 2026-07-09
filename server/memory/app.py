@@ -206,6 +206,23 @@ def identify_chunk(chunk_event_id: str, force: bool = False) -> None:
     audio = da.get_bytes(chunk["outputArtifactIds"][0])
     chunk_start = chunk_payload["tStartNanos"]
 
+    # Radio / background music gives far-field, mixed audio the voiceprint model
+    # cannot separate, so speech overlapping a Music tag is skipped — otherwise
+    # radio + occupants + roadside collapse into garbage speaker mega-clusters.
+    session_id = chunk_payload.get("sessionId")
+    music_intervals = []
+    for tag_id in index.by_kind("audio-tag-segment").get("eventIds", []):
+        tp = _pointer(tag_id)
+        if not tp:
+            continue
+        tpl = _payload(tp)
+        if tpl.get("sessionId") == session_id and tpl.get("label") == "Music":
+            music_intervals.append((tpl.get("tStartNanos", 0), tpl.get("tEndNanos", 0)))
+
+    def overlaps_music(t0: int, t1: int) -> bool:
+        mid = (t0 + t1) // 2
+        return any(m0 <= mid <= m1 for m0, m1 in music_intervals)
+
     def has_child_of_kind(event_id: str, kind: str) -> bool:
         return any(
             (child := _pointer(child_id)) and child["valueKind"] == kind
@@ -223,6 +240,8 @@ def identify_chunk(chunk_event_id: str, force: bool = False) -> None:
         end_ms = (seg_payload["tEndNanos"] - chunk_start) // 1_000_000
         if end_ms - start_ms < 700:
             continue  # too short for a stable voiceprint
+        if overlaps_music(seg_payload["tStartNanos"], seg_payload["tEndNanos"]):
+            continue  # speech over radio/music — the voiceprint would be unreliable
         try:
             request = urllib.request.Request(
                 f"{IDENT_URL}/embed-speaker?startMs={start_ms}&endMs={end_ms}", data=audio,
