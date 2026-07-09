@@ -384,14 +384,9 @@ def api_crop(event_id: str) -> Response:
 
     im = Image.open(io.BytesIO(data)).convert("RGB")
     W, H = im.size
-    x1, y1, x2, y2 = (float(v) for v in box)
-    # Vehicle boxes come from the on-device detector's 640x480 analysis frame,
-    # not the (larger) stored keyframe; scale them up. Face boxes are already in
-    # keyframe pixels (server-side insightface), so they are left as-is.
-    if p.get("valueKind") == "vehicle-observation":
-        sx, sy = W / 640.0, H / 480.0
-        x1, y1, x2, y2 = x1 * sx, y1 * sy, x2 * sx, y2 * sy
-    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+    # All observation boxes are stored in keyframe pixels (the server scales the
+    # detector's 640x480 track boxes before recording them).
+    x1, y1, x2, y2 = (int(v) for v in box)
     pw, ph = int((x2 - x1) * 0.2), int((y2 - y1) * 0.2)   # a little context around the box
     crop = im.crop((max(0, x1 - pw), max(0, y1 - ph), min(W, x2 + pw), min(H, y2 + ph)))
     if crop.width and crop.width < 240:                   # upscale tiny crops for visibility
@@ -537,7 +532,7 @@ async function openEvent(id){
  addLinks(g,'parents ▲',e.parents); addLinks(g,'children ▼',e.children);
  D.appendChild(g);
  // image fragment for observations (the box cropped from its keyframe, or the whole scene for items)
- if(['face-observation','vehicle-observation','item-observation'].includes(e.kind)){
+ if(['face-observation','vehicle-observation','item-observation','object-observation'].includes(e.kind)){
   const f=el('<div></div>'); f.appendChild(el('<h3>image fragment</h3>'));
   const img=el(`<img class=kf src="/api/crop/${encodeURIComponent(e.id)}">`);
   img.onerror=()=>img.replaceWith(el('<div class=mut>no image fragment</div>'));

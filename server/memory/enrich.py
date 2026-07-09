@@ -84,6 +84,25 @@ ITEM_PROMPT = (
 )
 
 
+OBJECT_PROMPT = (
+    "Name the single main object shown in this cropped image in 1-4 words. Be "
+    "specific and include a brand or type if legible (e.g. 'potting soil bag', "
+    "'terracotta pot', 'delivery van'). Reply with only the name, or NONE if "
+    "unclear."
+)
+
+
+def classify_crop(jpeg: bytes) -> str | None:
+    """Open-vocabulary label for a single cropped object — used to re-classify
+    the on-device COCO track detections, which mislabel anything outside their
+    80 classes ('soil bag' -> 'suitcase')."""
+    raw = _generate(VLM_MODEL, OBJECT_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
+    name = raw.strip().strip('".').splitlines()[0].strip() if raw else ""
+    if not name or name.lower() in _NAME_STOPWORDS or len(name) > 40:
+        return None
+    return name
+
+
 def describe_and_list_items(jpeg: bytes) -> tuple[str, list]:
     """One VLM pass returning (scene sentence, [item names]). Open-vocabulary —
     unlike the fixed COCO detector it names shed/room contents and reads their

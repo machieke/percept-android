@@ -1193,6 +1193,17 @@ def attribute_speakers_endpoint(sessionId: str, authorization: str | None = Head
 
 # --- Vehicle re-identification (the automotive analog of face/voice id) ------
 
+# The on-device detector reports boxes in a 640x480 analysis frame; keyframes
+# are stored larger (960x720, 1280x960), so track boxes must be scaled up to
+# keyframe pixels before cropping. Face boxes are already keyframe-space.
+DETECTOR_W, DETECTOR_H = 640, 480
+
+
+def _scale_det_box(box, W: int, H: int) -> tuple:
+    sx, sy = W / DETECTOR_W, H / DETECTOR_H
+    return int(box[0] * sx), int(box[1] * sy), int(box[2] * sx), int(box[3] * sy)
+
+
 def identify_vehicles(session_id: str, min_box_px: int = 56) -> dict:
     """Cluster vehicles by appearance so a car can be recognized across
     appearances and sessions. The on-device tracker already gives each vehicle a
@@ -1235,10 +1246,10 @@ def identify_vehicles(session_id: str, min_box_px: int = 56) -> dict:
             continue
         H, W = img.shape[:2]
         for t0, t1, bf, bl, label, track_id, tp in overlapping:
-            box = veh.interpolate_box(t_frame, t0, t1, bf, bl)
-            x1, y1, x2, y2 = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
-            if min(x2 - x1, y2 - y1) < min_box_px:
+            box = veh.interpolate_box(t_frame, t0, t1, bf, bl)          # detector 640x480 space
+            if min(box[2] - box[0], box[3] - box[1]) < min_box_px:
                 continue
+            x1, y1, x2, y2 = _scale_det_box(box, W, H)                  # -> keyframe pixels
             crop = img[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
             embedding = veh.appearance_embedding(crop)
             if not embedding:
@@ -1302,6 +1313,118 @@ def identify_vehicles_endpoint(sessionId: str, authorization: str | None = Heade
     """Queue vehicle re-identification for a session's tracked cars/trucks/buses."""
     check_auth(authorization)
     vehicle_queue.put(sessionId)
+    return {"ok": True, "queued": sessionId}
+
+
+# --- Re-classify low-signal COCO tracks with the open-vocabulary VLM ----------
+
+def reclassify_tracks(session_id: str, max_tracks: int = 14, min_box_px: int = 40) -> dict:
+    """The on-device COCO-80 detector mislabels anything outside its classes
+    (a soil bag -> 'suitcase'). Crop the most prominent tracks from the keyframe
+    they appear in (scaled to keyframe pixels) and re-label each with the VLM,
+    emitting an object-observation (open-vocab label + box) parented to the
+    track. Bounded to the largest few tracks so the CPU VLM stays tractable."""
+    import bisect
+
+    import cv2
+    import numpy as np
+
+    import vehicle as veh
+
+    frames = []
+    for event_id in index.by_kind("scene-change").get("eventIds", []):
+        p = _pointer(event_id)
+        if p and _payload(p).get("sessionId") == session_id and p.get("outputArtifactIds"):
+            frames.append((_payload(p).get("tNanos", 0), p["outputArtifactIds"][0]))
+    if not frames:
+        return {"ok": False, "reason": "no keyframes"}
+    frames.sort()
+    ftimes = [f[0] for f in frames]
+
+    candidates = []
+    for event_id in index.by_kind("track-segment").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        pl = _payload(p)
+        if pl.get("sessionId") != session_id:
+            continue
+        if any((c := _pointer(cid)) and c["valueKind"] == "object-observation"
+               for cid in index.by_parent(event_id).get("eventIds", [])):
+            continue
+        t0, t1 = pl["tStartNanos"], pl["tEndNanos"]
+        i = bisect.bisect_left(ftimes, t0)
+        if i >= len(frames) or frames[i][0] > t1:
+            continue                                     # no stored keyframe within this track's life
+        box = veh.interpolate_box(frames[i][0], t0, t1, pl["boxFirst"], pl["boxLast"])
+        if min(box[2] - box[0], box[3] - box[1]) < min_box_px:
+            continue
+        area = (box[2] - box[0]) * (box[3] - box[1])
+        candidates.append((area, p, frames[i][0], frames[i][1], box, pl.get("label"), pl.get("trackId")))
+    candidates.sort(key=lambda c: -c[0])
+
+    emitted = 0
+    cache: dict = {}
+    for area, p, t_frame, artifact_cid, box, coco, track_id in candidates[:max_tracks]:
+        if artifact_cid not in cache:
+            cache[artifact_cid] = cv2.imdecode(np.frombuffer(da.get_bytes(artifact_cid), np.uint8), cv2.IMREAD_COLOR)
+        img = cache[artifact_cid]
+        if img is None:
+            continue
+        H, W = img.shape[:2]
+        x1, y1, x2, y2 = _scale_det_box(box, W, H)
+        crop = img[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            continue
+        try:
+            label = enrichment.classify_crop(buf.tobytes())
+        except Exception as exc:  # noqa: BLE001
+            print(f"track reclass failed for {p['eventId']}: {exc}", flush=True)
+            continue
+        if not label:
+            continue
+        obs_at = _payload(p).get("observedAt", "2026-01-01T00:00:00Z")
+        cp = p["channelPath"]
+        with ingest_lock:
+            if ingest_or_skip_duplicate(
+                raw_payload={"kind": "raw-payload", "schema": "perception-object-v0.1",
+                             "sessionId": session_id, "trackId": track_id, "cocoLabel": coco,
+                             "label": label, "box": [x1, y1, x2, y2], "tNanos": t_frame, "observedAt": obs_at},
+                observed_at=obs_at, actor_path=["server", "percept-memory", "object-id"],
+                channel_path=[cp[0], cp[1], "objects"], value_kind="object-observation",
+                preview=f"{coco} -> {label}",
+                provenance={"source": "percept-memory-server", "observedBy": "percept-memory",
+                            "ingestionPipeline": "event-trace-v0",
+                            "extractionRunId": f"{enrichment.VLM_MODEL}+object@ollama"},
+                parent_event_ids=[p["eventId"]], root_event_id=p["rootEventId"], input_event_ids=[p["eventId"]],
+            ):
+                emitted += 1
+    return {"ok": True, "reclassified": emitted, "candidates": len(candidates)}
+
+
+reclassify_queue: "queue.Queue[str]" = queue.Queue()
+
+
+def reclassify_worker() -> None:
+    while True:
+        session_id = reclassify_queue.get()
+        try:
+            out = reclassify_tracks(session_id)
+            print(f"reclassified tracks for {session_id}: {out}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"track reclassification failed for {session_id}: {exc}", flush=True)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=reclassify_worker, daemon=True, name="reclassify").start()
+
+
+@app.post("/reclassify-tracks")
+def reclassify_tracks_endpoint(sessionId: str, authorization: str | None = Header(None)) -> dict:
+    """Queue VLM re-classification of a session's most prominent COCO tracks."""
+    check_auth(authorization)
+    reclassify_queue.put(sessionId)
     return {"ok": True, "queued": sessionId}
 
 
