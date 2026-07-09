@@ -22,7 +22,7 @@ OBJECTS = DATA_ROOT / "da" / "objects"
 
 app = FastAPI(title="percept-trace-browser")
 
-_state: dict = {"mtime": None, "pointers": [], "by_id": {}, "children": {}, "cluster_stats": {}}
+_state: dict = {"mtime": None, "pointers": [], "by_id": {}, "children": {}, "cluster_stats": {}, "item_stats": {}}
 
 
 def _digest(cid: str) -> str:
@@ -53,7 +53,7 @@ def load() -> None:
         return
     if _state["mtime"] == mtime:
         return
-    pointers, by_id, children, cluster_stats = [], {}, {}, {}
+    pointers, by_id, children, cluster_stats, item_stats = [], {}, {}, {}, {}
     with POINTER_LOG.open() as fh:
         for line in fh:
             line = line.strip()
@@ -64,7 +64,8 @@ def load() -> None:
             by_id[p["eventId"]] = p
             for parent in p.get("parentEventIds", []):
                 children.setdefault(parent, []).append(p["eventId"])
-            if p.get("valueKind") in ("face-observation", "speaker-observation", "vehicle-observation"):
+            vk = p.get("valueKind")
+            if vk in ("face-observation", "speaker-observation", "vehicle-observation"):
                 pl = json.loads(_payload_cached(_digest(p["payloadCid"])))
                 cid = pl.get("clusterId")
                 if cid:
@@ -73,7 +74,18 @@ def load() -> None:
                     st["sessions"].add(pl.get("sessionId"))
                     if len(st["eventIds"]) < 300:
                         st["eventIds"].append(p["eventId"])
-    _state.update(mtime=mtime, pointers=pointers, by_id=by_id, children=children, cluster_stats=cluster_stats)
+            elif vk == "item-observation":
+                pl = json.loads(_payload_cached(_digest(p["payloadCid"])))
+                slug = pl.get("itemSlug")
+                if slug:
+                    st = item_stats.setdefault(slug, {"name": pl.get("itemName", slug), "count": 0, "sessions": set(), "eventIds": []})
+                    st["count"] += 1
+                    st["name"] = pl.get("itemName", st["name"])
+                    st["sessions"].add(pl.get("sessionId"))
+                    if len(st["eventIds"]) < 200:
+                        st["eventIds"].append(p["eventId"])
+    _state.update(mtime=mtime, pointers=pointers, by_id=by_id, children=children,
+                  cluster_stats=cluster_stats, item_stats=item_stats)
 
 
 def session_of(p: dict) -> str:
@@ -274,6 +286,43 @@ def api_entities() -> JSONResponse:
     return JSONResponse(entities)
 
 
+@app.get("/api/items")
+def api_items() -> JSONResponse:
+    """Open-vocabulary items across the trace: each distinct item with its
+    observation count, the sessions it appears in, and whether it recurs."""
+    load()
+    items = []
+    for slug, st in _state["item_stats"].items():
+        sessions = sorted(s for s in st["sessions"] if s)
+        items.append({
+            "slug": slug, "name": st["name"], "count": st["count"],
+            "sessions": sessions, "sessionCount": len(sessions),
+            "recurring": len(sessions) >= 2,
+        })
+    items.sort(key=lambda i: (-i["sessionCount"], -i["count"], i["name"].lower()))
+    by_session: dict = {}
+    for slug, st in _state["item_stats"].items():
+        for s in st["sessions"]:
+            if s:
+                by_session.setdefault(s, 0)
+                by_session[s] += 1
+    return JSONResponse({"items": items, "sessionCounts": by_session})
+
+
+@app.get("/api/item/{slug}")
+def api_item(slug: str) -> JSONResponse:
+    load()
+    st = _state["item_stats"].get(slug, {})
+    rows = []
+    for eid in st.get("eventIds", []):
+        p = _state["by_id"].get(eid)
+        if not p:
+            continue
+        rows.append({"id": eid, "kind": p.get("valueKind"), "session": session_of(p),
+                     "preview": preview_of(p, payload_of(p))[:90]})
+    return JSONResponse({"slug": slug, "name": st.get("name", slug), "events": rows})
+
+
 @app.get("/api/cluster/{cid}")
 def api_cluster(cid: str) -> JSONResponse:
     load()
@@ -347,7 +396,7 @@ INDEX_HTML = r"""<!doctype html><html><head><meta charset=utf-8>
  .member{border:1px solid var(--bd);border-radius:6px;padding:6px;margin:6px 0}
  .bar{height:4px;background:#0a0e14;border-radius:2px;overflow:hidden;margin:2px 0 5px} .bar>i{display:block;height:100%;background:var(--good)}
 </style></head><body>
-<header><b>percept</b> <span id=tabSessions class="tab on">sessions</span><span id=tabEntities class="tab">entities</span> <span class=mut id=stat></span>
+<header><b>percept</b> <span id=tabSessions class="tab on">sessions</span><span id=tabEntities class="tab">entities</span><span id=tabItems class="tab">items</span> <span class=mut id=stat></span>
  <span style="margin-left:auto" class=mut>causal: <span class=lnk>parent</span> · child · <span style="color:var(--der)">derived</span> · <span style="color:var(--warn)">conclusion</span></span>
 </header>
 <main>
@@ -444,10 +493,39 @@ function addLinks(g,title,list){
 let mode='sessions';
 $('#tabSessions').onclick=()=>setMode('sessions');
 $('#tabEntities').onclick=()=>setMode('entities');
+$('#tabItems').onclick=()=>setMode('items');
 function setMode(m){
- mode=m; $('#tabSessions').classList.toggle('on',m==='sessions'); $('#tabEntities').classList.toggle('on',m==='entities');
+ mode=m;
+ $('#tabSessions').classList.toggle('on',m==='sessions');
+ $('#tabEntities').classList.toggle('on',m==='entities');
+ $('#tabItems').classList.toggle('on',m==='items');
  $('#events').innerHTML='<div class=empty>—</div>'; $('#detail').innerHTML='<div class=empty>—</div>';
- if(m==='sessions') loadSessions(); else loadEntities();
+ if(m==='sessions') loadSessions(); else if(m==='entities') loadEntities(); else loadItems();
+}
+async function loadItems(){
+ const r=await j('/api/items'); const box=$('#sessions'); box.innerHTML='';
+ const rec=r.items.filter(i=>i.recurring).length;
+ $('#stat').textContent=`· ${r.items.length} distinct items · ${rec} recurring`;
+ r.items.forEach(i=>{
+  const badge=i.recurring?`<span class=mod style="color:var(--good);border-color:var(--good)">${i.sessionCount} sessions</span>`:'';
+  const d=el(`<div class=ecard><div class=ename>${escape(i.name)}</div><div class=emeta>×${i.count} obs ${badge}</div></div>`);
+  d.onclick=()=>{document.querySelectorAll('.ecard').forEach(x=>x.classList.remove('sel'));d.classList.add('sel');openItem(i)};
+  box.appendChild(d);
+ });
+}
+function openItem(i){
+ const M=$('#events'); M.innerHTML='';
+ M.appendChild(el(`<div style="font-size:15px;color:var(--acc)">${escape(i.name)}</div>`));
+ M.appendChild(el(`<div class=emeta>${i.count} observations · ${i.sessionCount} session${i.sessionCount==1?'':'s'}${i.recurring?' · recurring':''}</div>`));
+ M.appendChild(el('<h3>seen in sessions</h3>'));
+ i.sessions.forEach(s=>{const r=el(`<div class=link-row><span class=lnk>${s}</span></div>`);r.onclick=()=>{setMode('sessions');setTimeout(()=>openSession(s),60)};M.appendChild(r);});
+ const vo=el('<div class=lnk style="margin-top:8px">view observations ▸</div>'); vo.onclick=()=>openItemObs(i.slug); M.appendChild(vo);
+ $('#detail').innerHTML='<div class=empty>select "view observations"</div>';
+}
+async function openItemObs(slug){
+ const r=await j('/api/item/'+encodeURIComponent(slug)); const D=$('#detail'); D.innerHTML='';
+ D.appendChild(el(`<h3>${escape(r.name)} — ${r.events.length} observations</h3>`));
+ r.events.forEach(e=>{const d=el(`<div class=link-row><span class="k derived">item</span> <span class=lnk>${escape(e.preview)}</span> <span class=b>${e.session}</span></div>`);d.onclick=()=>openEvent(e.id);D.appendChild(d);});
 }
 async function loadEntities(){
  const es=await j('/api/entities'); const box=$('#sessions'); box.innerHTML='';
