@@ -1481,6 +1481,7 @@ def resolve_places(max_cells: int = 8) -> dict:
     per pass (scene + visible items/signage) and emit a place-observation, so the
     place reasoner can name it and diff what changed between passes."""
     import bisect
+    import collections
 
     fixes = collections.defaultdict(list)
     for event_id in index.by_kind("location-fix").get("eventIds", []):
