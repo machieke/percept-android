@@ -22,6 +22,16 @@ OBJECTS = DATA_ROOT / "da" / "objects"
 
 app = FastAPI(title="percept-trace-browser")
 
+
+@app.middleware("http")
+async def no_store(request, call_next):
+    # The single-page app is served inline and the trace changes constantly, so
+    # never let the browser cache the page or the API (avoids stale UI/data).
+    response = await call_next(request)
+    if "/api/artifact" not in request.url.path and "/api/crop" not in request.url.path:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 _state: dict = {"mtime": None, "pointers": [], "by_id": {}, "children": {}, "cluster_stats": {}, "item_stats": {}}
 
 
