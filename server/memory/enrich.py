@@ -75,6 +75,37 @@ def caption_keyframe(jpeg: bytes) -> str:
     return _generate(VLM_MODEL, CAPTION_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
 
 
+ITEM_PROMPT = (
+    "You are inventorying what is visible in this photo. Reply with EXACTLY two lines:\n"
+    "Scene: <one short factual sentence>\n"
+    "Items: <comma-separated list of the distinct physical items you can clearly "
+    "identify, including any readable brand or label text; omit anything too "
+    "blurry to identify and do not guess>"
+)
+
+
+def describe_and_list_items(jpeg: bytes) -> tuple[str, list]:
+    """One VLM pass returning (scene sentence, [item names]). Open-vocabulary —
+    unlike the fixed COCO detector it names shed/room contents and reads their
+    labels ('Hyacinthus', 'Wagner sprayer'). Best-effort parse of the two lines."""
+    import re
+
+    raw = _generate(VLM_MODEL, ITEM_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
+    scene, items = "", []
+    for line in raw.splitlines():
+        low = line.strip()
+        if low.lower().startswith("scene:"):
+            scene = low[6:].strip()
+        elif low.lower().startswith("items:"):
+            # Split on commas that are NOT inside parentheses, so a bracketed
+            # brand list ("plant food (Miracle-Gro, DCM)") stays one item.
+            items = [i.strip().strip('."') for i in re.split(r",(?![^(]*\))", low[6:])]
+    items = [i for i in items if 1 < len(i) <= 40 and any(c.isalpha() for c in i)]
+    if not scene and raw:
+        scene = raw.strip().splitlines()[0][:200]
+    return scene, items[:20]
+
+
 NAME_PROMPT = (
     "This is a crop from a video-call grid or a scene with a visible name "
     "label (e.g. a video-call participant tile, a name tag, or a badge). "

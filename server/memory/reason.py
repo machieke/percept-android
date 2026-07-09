@@ -379,6 +379,38 @@ def cooccurrence_conclusions(evidence: dict) -> list[dict]:
     return out
 
 
+def item_conclusions(evidence: dict) -> list[dict]:
+    """Recurring open-vocabulary items: an item name (VLM-identified) seen across
+    several sessions is a persistent object in the space ('the Wagner sprayer is
+    in the shed across visits'). Item names are noisy, so recurrence needs a
+    couple of sessions and carries a modest horizon."""
+    item_sessions = evidence.get("item_sessions") or {}
+    item_names = evidence.get("item_names") or {}
+    item_events = evidence.get("item_events") or {}
+    out = []
+    for slug, sessions in item_sessions.items():
+        n = len(sessions)
+        if n < 2:
+            continue
+        name = item_names.get(slug, slug)
+        frequency, confidence = nal_truth(n, n, 2)
+        out.append(
+            {
+                "subjectKind": "item",
+                "subjectId": f"item:{slug}",
+                "predicate": "recurs-across-sessions",
+                "object": str(n),
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": n,
+                "totalEvidence": n,
+                "statement": f"item '{name}' recurs in {n} sessions",
+                "evidenceEventIds": item_events.get(slug, [])[:8],
+            }
+        )
+    return out
+
+
 REASONERS = {
     "identity-namer-v0": name_conclusions,
     "recurrence-v0": recurrence_conclusions,
@@ -387,6 +419,7 @@ REASONERS = {
     "entity-resolver-v0": entity_conclusions,
     "location-binder-v0": location_conclusions,
     "cooccurrence-binder-v0": cooccurrence_conclusions,
+    "item-recurrence-v0": item_conclusions,
 }
 
 

@@ -793,6 +793,22 @@ def gather_association_evidence() -> dict:
                 cooc[(fcid, scid)] += 1
                 face_marg[fcid] += 1
 
+    # Open-vocabulary items (VLM), keyed by normalized name across sessions.
+    item_sessions = collections.defaultdict(set)
+    item_names = {}
+    item_events = collections.defaultdict(list)
+    for event_id in index.by_kind("item-observation").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        pl = _payload(p)
+        slug = pl.get("itemSlug")
+        if not slug:
+            continue
+        item_sessions[slug].add(pl.get("sessionId"))
+        item_names[slug] = pl.get("itemName", slug)
+        item_events[slug].append(event_id)
+
     return {
         "cluster_name": cluster_name,
         "cluster_name_conf": {cid: v for cid, v in name_conf.items() if v},
@@ -801,6 +817,9 @@ def gather_association_evidence() -> dict:
         "cooc_face_marg": face_marg,
         "cooc_spk_marg": spk_marg,
         "cooc_total": total_windows,
+        "item_sessions": item_sessions,
+        "item_names": item_names,
+        "item_events": item_events,
     }
 
 
@@ -1286,10 +1305,101 @@ def identify_vehicles_endpoint(sessionId: str, authorization: str | None = Heade
     return {"ok": True, "queued": sessionId}
 
 
+# --- Open-vocabulary item identification (what the COCO detector can't name) ---
+
+def _item_slug(name: str) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def identify_items(session_id: str, max_keyframes: int = 6) -> dict:
+    """Describe keyframes and inventory their items with the VLM — open-
+    vocabulary, so shed/room contents the fixed COCO detector mislabels ('soil
+    bag'->'suitcase') are named correctly and their labels read. Decoupled from
+    audio (a silent visual walkthrough gets described), and bounded to a spread
+    of keyframes so the CPU VLM stays tractable. Emits a scene-caption and one
+    item-observation per identified item, parented to the scene-change."""
+    frames = []
+    for event_id in index.by_kind("scene-change").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p or _payload(p).get("sessionId") != session_id or not p.get("outputArtifactIds"):
+            continue
+        frames.append((_payload(p).get("tNanos", 0), event_id, p))
+    if not frames:
+        return {"ok": False, "reason": "no keyframes"}
+    frames.sort()
+    step = max(1, len(frames) // max_keyframes)          # spread across the session for coverage
+    selected = frames[::step][:max_keyframes]
+
+    n_items = n_caps = 0
+    for t_nanos, event_id, p in selected:
+        try:
+            scene, items = enrichment.describe_and_list_items(da.get_bytes(p["outputArtifactIds"][0]))
+        except Exception as exc:  # noqa: BLE001
+            print(f"item id failed for {event_id}: {exc}", flush=True)
+            continue
+        pl = _payload(p)
+        obs_at = pl.get("observedAt", "2026-01-01T00:00:00Z")
+        cp = p["channelPath"]
+        prov = {"source": "percept-memory-server", "observedBy": "percept-memory",
+                "ingestionPipeline": "event-trace-v0",
+                "extractionRunId": f"{enrichment.VLM_MODEL}+items@ollama"}
+        if scene:
+            with ingest_lock:
+                if ingest_or_skip_duplicate(
+                    raw_payload={"kind": "raw-payload", "schema": "perception-scene-caption-v0.1",
+                                 "sessionId": session_id, "text": scene, "tNanos": t_nanos, "observedAt": obs_at},
+                    observed_at=obs_at, actor_path=["server", "percept-memory", "vlm"],
+                    channel_path=cp, value_kind="scene-caption", preview=scene[:160], provenance=prov,
+                    parent_event_ids=[event_id], root_event_id=p["rootEventId"], input_event_ids=[event_id],
+                ):
+                    n_caps += 1
+        for item in items:
+            with ingest_lock:
+                if ingest_or_skip_duplicate(
+                    raw_payload={"kind": "raw-payload", "schema": "perception-item-v0.1",
+                                 "sessionId": session_id, "itemName": item, "itemSlug": _item_slug(item),
+                                 "tNanos": t_nanos, "observedAt": obs_at},
+                    observed_at=obs_at, actor_path=["server", "percept-memory", "item-id"],
+                    channel_path=[cp[0], cp[1], "items"], value_kind="item-observation",
+                    preview=item[:80], provenance=prov,
+                    parent_event_ids=[event_id], root_event_id=p["rootEventId"], input_event_ids=[event_id],
+                ):
+                    n_items += 1
+    return {"ok": True, "keyframes": len(selected), "items": n_items, "captions": n_caps}
+
+
+item_queue: "queue.Queue[str]" = queue.Queue()
+
+
+def item_worker() -> None:
+    while True:
+        session_id = item_queue.get()
+        try:
+            out = identify_items(session_id)
+            print(f"identified items for {session_id}: {out}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"item identification failed for {session_id}: {exc}", flush=True)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=item_worker, daemon=True, name="item").start()
+
+
+@app.post("/identify-items")
+def identify_items_endpoint(sessionId: str, authorization: str | None = Header(None)) -> dict:
+    """Queue open-vocabulary item identification over a session's keyframes."""
+    check_auth(authorization)
+    item_queue.put(sessionId)
+    return {"ok": True, "queued": sessionId}
+
+
 # --- Continuous derivation: keep entities/conclusions current on a schedule ---
 
 REASON_INTERVAL_S = int(os.environ.get("REASON_INTERVAL_S", "900"))   # tier 1: cheap reasoning sweep
 AUTO_DERIVE = os.environ.get("AUTO_DERIVE", "1") == "1"               # tier 2: per-session VLM derivations
+AUTO_ITEMS = os.environ.get("AUTO_ITEMS", "0") == "1"                 # open-vocab item id (VLM-heavy; off by default)
 
 
 def _sessions_by_kind(*kinds: str) -> dict:
@@ -1318,7 +1428,7 @@ def enqueue_session_derivations() -> dict:
     re-id is CPU-cheap (no VLM), so it auto-runs wherever there are vehicles."""
     present = _sessions_by_kind(
         "face-observation", "vehicle-observation", "identity-resolution",
-        "speaker-attribution", "session-stop",
+        "speaker-attribution", "session-stop", "scene-change", "item-observation",
     )
     complete = present["session-stop"]          # only derive finished sessions
     tiled = {p.stem[len("tiles-"):] for p in DATA_ROOT.glob("tiles-*.json")}
@@ -1334,7 +1444,7 @@ def enqueue_session_derivations() -> dict:
     # Persisted attempted-set so a session that yields no output (e.g. all
     # vehicles too small to crop) is not re-attempted every tick.
     done = _load_derived_state()
-    queued = {"resolve": [], "attribute": [], "vehicle": []}
+    queued = {"resolve": [], "attribute": [], "vehicle": [], "items": []}
     marks = []
 
     def enqueue(kind: str, q: "queue.Queue", sids: set) -> None:
@@ -1349,6 +1459,8 @@ def enqueue_session_derivations() -> dict:
     enqueue("resolve", resolve_queue, (tiled & present["face-observation"]) - present["identity-resolution"])
     enqueue("attribute", attribute_queue, tiled - present["speaker-attribution"])
     enqueue("vehicle", vehicle_queue, veh_sessions - present["vehicle-observation"])
+    if AUTO_ITEMS:
+        enqueue("items", item_queue, present["scene-change"] - present["item-observation"])
     if marks:
         _save_derived_state(done | set(marks))
     return queued
