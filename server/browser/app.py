@@ -22,7 +22,7 @@ OBJECTS = DATA_ROOT / "da" / "objects"
 
 app = FastAPI(title="percept-trace-browser")
 
-_state: dict = {"mtime": None, "pointers": [], "by_id": {}, "children": {}}
+_state: dict = {"mtime": None, "pointers": [], "by_id": {}, "children": {}, "cluster_stats": {}}
 
 
 def _digest(cid: str) -> str:
@@ -53,7 +53,7 @@ def load() -> None:
         return
     if _state["mtime"] == mtime:
         return
-    pointers, by_id, children = [], {}, {}
+    pointers, by_id, children, cluster_stats = [], {}, {}, {}
     with POINTER_LOG.open() as fh:
         for line in fh:
             line = line.strip()
@@ -64,7 +64,16 @@ def load() -> None:
             by_id[p["eventId"]] = p
             for parent in p.get("parentEventIds", []):
                 children.setdefault(parent, []).append(p["eventId"])
-    _state.update(mtime=mtime, pointers=pointers, by_id=by_id, children=children)
+            if p.get("valueKind") in ("face-observation", "speaker-observation", "vehicle-observation"):
+                pl = json.loads(_payload_cached(_digest(p["payloadCid"])))
+                cid = pl.get("clusterId")
+                if cid:
+                    st = cluster_stats.setdefault(cid, {"modality": cid.split("-")[0], "count": 0, "sessions": set(), "eventIds": []})
+                    st["count"] += 1
+                    st["sessions"].add(pl.get("sessionId"))
+                    if len(st["eventIds"]) < 300:
+                        st["eventIds"].append(p["eventId"])
+    _state.update(mtime=mtime, pointers=pointers, by_id=by_id, children=children, cluster_stats=cluster_stats)
 
 
 def session_of(p: dict) -> str:
@@ -190,6 +199,95 @@ def api_event(event_id: str) -> JSONResponse:
     })
 
 
+@app.get("/api/entities")
+def api_entities() -> JSONResponse:
+    """The resolved entity graph, assembled from the conclusion events already
+    in the trace (has-name / usually-at / recurs-across-sessions / same-as) plus
+    each cluster's observation stats — so the browser stays a pure trace reader
+    with no dependency on the memory server."""
+    load()
+    import collections
+
+    has_name: dict = collections.defaultdict(dict)
+    usually_at: dict = {}
+    recurs: dict = {}
+    same_as: dict = collections.defaultdict(set)
+    for p in _state["pointers"]:
+        if p.get("valueKind") != "conclusion":
+            continue
+        pl = payload_of(p)
+        pred, subj, obj = pl.get("predicate"), pl.get("subjectId"), pl.get("object")
+        if pred == "has-name":
+            has_name[subj][obj] = max(has_name[subj].get(obj, 0), pl.get("confidencePerMille", 0))
+        elif pred == "usually-at":
+            usually_at[subj] = {"loc": obj, "fixes": pl.get("positiveEvidence")}
+        elif pred == "recurs-across-sessions":
+            try:
+                recurs[subj] = int(obj)
+            except (TypeError, ValueError):
+                pass
+        elif pred == "same-as":
+            same_as[subj].add(obj)
+            same_as[obj].add(subj)
+
+    stats = _state["cluster_stats"]
+
+    def member(cid: str) -> dict:
+        st = stats.get(cid, {})
+        return {
+            "cluster": cid,
+            "modality": cid.split("-")[0],
+            "observations": st.get("count", 0),
+            "sessions": sorted(s for s in st.get("sessions", set()) if s),
+            "names": has_name.get(cid, {}),
+            "usuallyAt": usually_at.get(cid),
+        }
+
+    best_name = {c: max(v, key=v.get) for c, v in has_name.items() if v}
+    by_name: dict = collections.defaultdict(list)
+    for c, nm in best_name.items():
+        by_name[nm].append(c)
+
+    entities = []
+    for name, members in by_name.items():
+        members = sorted(set(members) | {x for m in members for x in same_as.get(m, set())})
+        ms = [member(m) for m in members]
+        sessions = sorted({s for m in ms for s in m["sessions"]})
+        entities.append({
+            "name": name,
+            "members": ms,
+            "modalities": sorted({m["modality"] for m in ms}),
+            "sessions": sessions,
+            "sessionCount": len(sessions),
+            "usuallyAt": next((m["usuallyAt"] for m in ms if m["usuallyAt"]), None),
+        })
+    # recurring but still-unnamed clusters become pseudonymous entities
+    for cid, _ in recurs.items():
+        if cid in best_name:
+            continue
+        m = member(cid)
+        entities.append({
+            "name": None, "pseudonym": cid, "members": [m], "modalities": [m["modality"]],
+            "sessions": m["sessions"], "sessionCount": len(m["sessions"]), "usuallyAt": m["usuallyAt"],
+        })
+    entities.sort(key=lambda e: -e["sessionCount"])
+    return JSONResponse(entities)
+
+
+@app.get("/api/cluster/{cid}")
+def api_cluster(cid: str) -> JSONResponse:
+    load()
+    st = _state["cluster_stats"].get(cid, {})
+    rows = []
+    for eid in st.get("eventIds", []):
+        p = _state["by_id"].get(eid)
+        if not p:
+            continue
+        pl = payload_of(p)
+        rows.append({"id": eid, "kind": p.get("valueKind"), "session": session_of(p), "preview": preview_of(p, pl)[:90]})
+    return JSONResponse({"cluster": cid, "events": rows})
+
+
 @app.get("/api/artifact/{cid:path}")
 def api_artifact(cid: str) -> Response:
     path = OBJECTS / _digest(cid)
@@ -240,8 +338,16 @@ INDEX_HTML = r"""<!doctype html><html><head><meta charset=utf-8>
  .rel{color:var(--mut)} .cnt{color:var(--good)}
  .link-row{padding:3px 6px;border-radius:5px;cursor:pointer} .link-row:hover{background:var(--panel)}
  .empty{color:var(--mut);padding:20px;text-align:center}
+ .tab{padding:2px 10px;border:1px solid var(--bd);border-radius:6px;cursor:pointer;color:var(--mut);margin-right:4px}
+ .tab.on{background:var(--acc);color:#0d1117;border-color:var(--acc)}
+ .ecard{padding:8px;border-radius:8px;cursor:pointer;border:1px solid transparent;margin-bottom:4px}
+ .ecard:hover{background:var(--panel)} .ecard.sel{background:var(--panel);border-color:var(--acc)}
+ .ename{color:var(--fg);font-size:14px} .emeta{color:var(--mut);font-size:11px}
+ .mod{font-size:10px;padding:0 6px;border:1px solid var(--bd);border-radius:8px;color:var(--der);margin-right:3px}
+ .member{border:1px solid var(--bd);border-radius:6px;padding:6px;margin:6px 0}
+ .bar{height:4px;background:#0a0e14;border-radius:2px;overflow:hidden;margin:2px 0 5px} .bar>i{display:block;height:100%;background:var(--good)}
 </style></head><body>
-<header><b>percept</b> trace browser <span class=mut id=stat></span>
+<header><b>percept</b> <span id=tabSessions class="tab on">sessions</span><span id=tabEntities class="tab">entities</span> <span class=mut id=stat></span>
  <span style="margin-left:auto" class=mut>causal: <span class=lnk>parent</span> · child · <span style="color:var(--der)">derived</span> · <span style="color:var(--warn)">conclusion</span></span>
 </header>
 <main>
@@ -331,7 +437,51 @@ function addLinks(g,title,list){
   r.onclick=()=>openEvent(x.id); g.appendChild(r);
  });
 }
+// --- entities view ---
+let mode='sessions';
+$('#tabSessions').onclick=()=>setMode('sessions');
+$('#tabEntities').onclick=()=>setMode('entities');
+function setMode(m){
+ mode=m; $('#tabSessions').classList.toggle('on',m==='sessions'); $('#tabEntities').classList.toggle('on',m==='entities');
+ $('#events').innerHTML='<div class=empty>—</div>'; $('#detail').innerHTML='<div class=empty>—</div>';
+ if(m==='sessions') loadSessions(); else loadEntities();
+}
+async function loadEntities(){
+ const es=await j('/api/entities'); const box=$('#sessions'); box.innerHTML='';
+ $('#stat').textContent=`· ${es.length} entities`;
+ es.forEach(e=>{
+  const nm=e.name||('· '+e.pseudonym);
+  const mods=e.modalities.map(m=>`<span class=mod>${m}</span>`).join('');
+  const d=el(`<div class=ecard><div class=ename>${escape(nm)}</div><div class=emeta>${mods} ${e.sessionCount} sessions${e.usuallyAt?' · 📍':''}</div></div>`);
+  d.onclick=()=>{document.querySelectorAll('.ecard').forEach(x=>x.classList.remove('sel'));d.classList.add('sel');openEntity(e)};
+  box.appendChild(d);
+ });
+}
+function openEntity(e){
+ const M=$('#events'); M.innerHTML='';
+ M.appendChild(el(`<div style="font-size:15px;color:var(--acc)">${escape(e.name||e.pseudonym)}</div>`));
+ const loc=e.usuallyAt?` · usually-at ${e.usuallyAt.loc} (${e.usuallyAt.fixes} fixes)`:'';
+ M.appendChild(el(`<div class=emeta>${e.modalities.join(' / ')} · ${e.sessionCount} sessions${loc}</div>`));
+ M.appendChild(el('<h3>members</h3>'));
+ e.members.forEach(m=>{
+  const names=Object.entries(m.names).sort((a,b)=>b[1]-a[1]);
+  const nh=names.map(([n,c])=>`<div class=emeta>${escape(n)} — conf ${c}<div class=bar><i style="width:${c/10}%"></i></div></div>`).join('');
+  const mm=el(`<div class=member><span class="k derived">${m.cluster}</span> <span class=emeta>${m.observations} obs · ${m.sessions.length} sessions</span>${nh?'<div style="margin-top:4px">'+nh+'</div>':''}<div class=lnk style="margin-top:3px">view observations ▸</div></div>`);
+  mm.querySelector('.lnk').onclick=()=>openCluster(m.cluster);
+  M.appendChild(mm);
+ });
+ if(e.sessions.length){
+  M.appendChild(el('<h3>appears in sessions</h3>'));
+  e.sessions.forEach(s=>{const r=el(`<div class=link-row><span class=lnk>${s}</span></div>`);r.onclick=()=>{setMode('sessions');setTimeout(()=>openSession(s),60)};M.appendChild(r);});
+ }
+ $('#detail').innerHTML='<div class=empty>select a member to see its observations</div>';
+}
+async function openCluster(cid){
+ const r=await j('/api/cluster/'+encodeURIComponent(cid)); const D=$('#detail'); D.innerHTML='';
+ D.appendChild(el(`<h3>${cid} — ${r.events.length} observations</h3>`));
+ r.events.forEach(e=>{const d=el(`<div class=link-row><span class="k derived">${e.kind}</span> <span class=lnk>${escape(e.preview)}</span> <span class=b>${e.session}</span></div>`);d.onclick=()=>openEvent(e.id);D.appendChild(d);});
+}
 window.el=el;
 loadSessions();
-setInterval(loadSessions, 15000);
+setInterval(()=>{ if(mode==='sessions') loadSessions(); }, 15000);
 </script></body></html>"""
