@@ -177,6 +177,8 @@ def transcribe_chunk(pointer: dict, force: bool = False) -> dict | None:
         created.append(ingested.event_id)
     if not created:
         return None
+    if IDENT_ENABLED:
+        identity_queue.put(chunk_event_id)
     if ENRICH_ENABLED:
         enrich_queue.put(chunk_event_id)
     return {"chunk": chunk_event_id, "asrEventIds": created}
@@ -586,24 +588,34 @@ def enrich_chunk(chunk_event_id: str) -> None:
 
 
 enrich_queue: "queue.Queue" = queue.Queue()
+identity_queue: "queue.Queue" = queue.Queue()
+
+
+def identity_worker() -> None:
+    """Face + voice embeddings run on the ident service (~ms each), not ollama —
+    so they get their own worker that races ahead of the slow VLM/LLM enrichment
+    instead of being serialized behind each chunk's captions."""
+    while True:
+        item = identity_queue.get()
+        chunk_event_id, force = item if isinstance(item, tuple) else (item, False)
+        try:
+            identify_chunk(chunk_event_id, force=force)
+        except Exception as exc:  # noqa: BLE001 - identity is best-effort
+            print(f"identification failed for {chunk_event_id}: {exc}", flush=True)
 
 
 def enrich_worker() -> None:
     while True:
         item = enrich_queue.get()
         chunk_event_id, force = item if isinstance(item, tuple) else (item, False)
-        if IDENT_ENABLED:
-            try:
-                # Identity first: embeddings take milliseconds, captions minutes.
-                identify_chunk(chunk_event_id, force=force)
-            except Exception as exc:  # noqa: BLE001 - identity is best-effort
-                print(f"identification failed for {chunk_event_id}: {exc}", flush=True)
         try:
             enrich_chunk(chunk_event_id)
         except Exception as exc:  # noqa: BLE001 - enrichment is best-effort
             print(f"enrichment failed for {chunk_event_id}: {exc}", flush=True)
 
 
+if IDENT_ENABLED:
+    threading.Thread(target=identity_worker, daemon=True, name="identity").start()
 if ENRICH_ENABLED:
     threading.Thread(target=enrich_worker, daemon=True, name="enrich").start()
 
@@ -618,6 +630,7 @@ def healthz() -> dict:
         "stats": index.state_stats(),
         "replayed": REPLAYED,
         "enrichQueue": enrich_queue.qsize(),
+        "identityQueue": identity_queue.qsize(),
     }
 
 
@@ -632,6 +645,8 @@ def enrich_backfill(
     for event_id in index.by_kind("audio-chunk").get("eventIds", []):
         pointer = _pointer(event_id)
         if pointer and _payload(pointer).get("sessionId") == sessionId:
+            if IDENT_ENABLED:
+                identity_queue.put((event_id, bool(force)))
             enrich_queue.put((event_id, bool(force)))
             queued += 1
     return {"ok": True, "queued": queued}
