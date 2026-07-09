@@ -411,6 +411,85 @@ def item_conclusions(evidence: dict) -> list[dict]:
     return out
 
 
+def _norm_item(s: str) -> str:
+    s = s.lower()
+    s = re.sub(r"^(a|an|the|some|several|two|three|four|many|small|large|blue|red|green|white|black)\s+", "", s)
+    return re.sub(r"[^a-z0-9 ]", "", s).strip().rstrip("s")
+
+
+def place_conclusions(evidence: dict) -> list[dict]:
+    """A GPS cell (~11m) revisited across sessions is the same place — a static
+    building/landmark re-identified by location (reliable, full confidence,
+    unlike appearance embeddings). Named from any VLM place description."""
+    place_cells = evidence.get("place_cells") or {}
+    place_latlon = evidence.get("place_latlon") or {}
+    place_obs = evidence.get("place_obs") or {}
+    out = []
+    for cell, sessions in place_cells.items():
+        n = len(sessions)
+        if n < 2:
+            continue
+        obs = place_obs.get(cell, {})
+        names = [d["name"] for d in obs.values() if d.get("name")]
+        name = collections.Counter(names).most_common(1)[0][0] if names else None
+        lat, lon = place_latlon.get(cell, (0, 0))
+        frequency, confidence = nal_truth(n, n)
+        label = f"'{name}' " if name else ""
+        out.append(
+            {
+                "subjectKind": "place",
+                "subjectId": f"place:{cell}",
+                "predicate": "recurs-across-sessions",
+                "object": str(n),
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": n,
+                "totalEvidence": n,
+                "statement": f"place {label}({lat / 1e7:.5f},{lon / 1e7:.5f}) revisited in {n} sessions",
+                "evidenceEventIds": [d["eventId"] for d in obs.values() if d.get("eventId")],
+            }
+        )
+    return out
+
+
+def change_conclusions(evidence: dict) -> list[dict]:
+    """What changed at a place between passes: items the VLM saw at the cell in
+    one session but not another. Honest and coarse — a difference can be a real
+    change (a van parked/left) or VLM variance, so confidence stays modest."""
+    place_obs = evidence.get("place_obs") or {}
+    place_latlon = evidence.get("place_latlon") or {}
+    out = []
+    for cell, obs in place_obs.items():
+        if len(obs) < 2:
+            continue
+        sess_items = {s: {_norm_item(i) for i in d.get("items", []) if _norm_item(i)} for s, d in obs.items()}
+        sessions = sorted(sess_items)
+        common = set.intersection(*sess_items.values())
+        appeared = {s: sorted(sess_items[s] - common) for s in sessions if sess_items[s] - common}
+        if not any(appeared.values()):
+            continue
+        lat, lon = place_latlon.get(cell, (0, 0))
+        parts = "; ".join(f"{s[-6:]}: {', '.join(v[:4])}" for s, v in appeared.items() if v)
+        total = sum(len(v) for v in sess_items.values())
+        positive = total - len(common) * len(sessions)
+        frequency, confidence = nal_truth(max(1, positive), max(1, total), 3)
+        out.append(
+            {
+                "subjectKind": "place",
+                "subjectId": f"place:{cell}",
+                "predicate": "changed",
+                "object": parts[:80],
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": positive,
+                "totalEvidence": total,
+                "statement": f"change at ({lat / 1e7:.5f},{lon / 1e7:.5f}) across passes — {parts}",
+                "evidenceEventIds": [d["eventId"] for d in obs.values() if d.get("eventId")],
+            }
+        )
+    return out
+
+
 REASONERS = {
     "identity-namer-v0": name_conclusions,
     "recurrence-v0": recurrence_conclusions,
@@ -420,6 +499,8 @@ REASONERS = {
     "location-binder-v0": location_conclusions,
     "cooccurrence-binder-v0": cooccurrence_conclusions,
     "item-recurrence-v0": item_conclusions,
+    "place-recurrence-v0": place_conclusions,
+    "place-change-v0": change_conclusions,
 }
 
 

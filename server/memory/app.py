@@ -808,6 +808,32 @@ def gather_association_evidence() -> dict:
                 cooc[(fcid, scid)] += 1
                 face_marg[fcid] += 1
 
+    # Places: GPS cells (~11m) revisited across sessions are recurring locations
+    # (buildings/landmarks are static, so location is the re-id key), enriched
+    # with any VLM place descriptions for naming + change detection.
+    place_cells = collections.defaultdict(set)
+    place_latlon = {}
+    for event_id in index.by_kind("location-fix").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        d = _payload(p)
+        if d.get("latE7") is None:
+            continue
+        cell = f"{d['latE7'] / 1e7:.4f},{d['lonE7'] / 1e7:.4f}"
+        place_cells[cell].add(d["sessionId"])
+        place_latlon[cell] = (d["latE7"], d["lonE7"])
+    place_obs = collections.defaultdict(dict)
+    for event_id in index.by_kind("place-observation").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        d = _payload(p)
+        place_obs[d["cellKey"]][d["sessionId"]] = {
+            "name": d.get("name", ""), "items": d.get("items", []),
+            "latE7": d.get("latE7"), "lonE7": d.get("lonE7"), "eventId": event_id,
+        }
+
     # Open-vocabulary items (VLM), keyed by normalized name across sessions.
     item_sessions = collections.defaultdict(set)
     item_names = {}
@@ -835,6 +861,9 @@ def gather_association_evidence() -> dict:
         "item_sessions": item_sessions,
         "item_names": item_names,
         "item_events": item_events,
+        "place_cells": place_cells,
+        "place_latlon": place_latlon,
+        "place_obs": place_obs,
     }
 
 
@@ -1441,6 +1470,111 @@ def reclassify_tracks_endpoint(sessionId: str, authorization: str | None = Heade
     check_auth(authorization)
     reclassify_queue.put(sessionId)
     return {"ok": True, "queued": sessionId}
+
+
+# --- Place resolution: recurring GPS cells = the same building/landmark --------
+
+def resolve_places(max_cells: int = 8) -> dict:
+    """Buildings/landmarks are static, so a GPS cell (~11m) revisited across
+    sessions is the same place — re-identified by location, no fragile appearance
+    embedding. For the most-revisited recurring cells, VLM-describe one keyframe
+    per pass (scene + visible items/signage) and emit a place-observation, so the
+    place reasoner can name it and diff what changed between passes."""
+    import bisect
+
+    fixes = collections.defaultdict(list)
+    for event_id in index.by_kind("location-fix").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        d = _payload(p)
+        if d.get("latE7") is not None:
+            fixes[d["sessionId"]].append((d.get("tNanos", 0), d["latE7"], d["lonE7"]))
+    for s in fixes:
+        fixes[s].sort()
+    ftimes = {s: [f[0] for f in arr] for s, arr in fixes.items()}
+
+    def cell_of(sid, t):
+        arr = fixes.get(sid)
+        if not arr:
+            return None
+        i = bisect.bisect_left(ftimes[sid], t)
+        cand = [arr[j] for j in (i - 1, i) if 0 <= j < len(arr)]
+        if not cand:
+            return None
+        f = min(cand, key=lambda x: abs(x[0] - t))
+        return f"{f[1] / 1e7:.4f},{f[2] / 1e7:.4f}", f[1], f[2]
+
+    # One representative keyframe per (cell, session): the temporally-middle one.
+    cell_kf = collections.defaultdict(dict)
+    for event_id in index.by_kind("scene-change").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p or not p.get("outputArtifactIds"):
+            continue
+        d = _payload(p)
+        c = cell_of(d["sessionId"], d.get("tNanos", 0))
+        if not c:
+            continue
+        cell, late, lone = c
+        cell_kf[cell].setdefault(d["sessionId"], []).append((d.get("tNanos", 0), event_id, p["outputArtifactIds"][0], late, lone))
+
+    recurring = sorted(((len(v), c, v) for c, v in cell_kf.items() if len(v) >= 2), key=lambda x: -x[0])
+    emitted = 0
+    for _, cell, per_session in recurring[:max_cells]:
+        for sid, kfs in per_session.items():
+            kfs.sort()
+            t_frame, kf_eid, artifact_cid, late, lone = kfs[len(kfs) // 2]   # middle pass keyframe
+            kf = _pointer(kf_eid)
+            if any((ch := _pointer(cid)) and ch["valueKind"] == "place-observation"
+                   for cid in index.by_parent(kf_eid).get("eventIds", [])):
+                continue
+            try:
+                scene, items = enrichment.describe_and_list_items(da.get_bytes(artifact_cid))
+            except Exception as exc:  # noqa: BLE001
+                print(f"place describe failed for {kf_eid}: {exc}", flush=True)
+                continue
+            obs_at = _payload(kf).get("observedAt", "2026-01-01T00:00:00Z")
+            cp = kf["channelPath"]
+            with ingest_lock:
+                if ingest_or_skip_duplicate(
+                    raw_payload={"kind": "raw-payload", "schema": "perception-place-v0.1",
+                                 "sessionId": sid, "cellKey": cell, "latE7": late, "lonE7": lone,
+                                 "name": scene[:100], "items": items, "tNanos": t_frame, "observedAt": obs_at},
+                    observed_at=obs_at, actor_path=["server", "percept-memory", "place-id"],
+                    channel_path=[cp[0], cp[1], "place"], value_kind="place-observation",
+                    preview=f"{cell}: {scene[:60]}",
+                    provenance={"source": "percept-memory-server", "observedBy": "percept-memory",
+                                "ingestionPipeline": "event-trace-v0",
+                                "extractionRunId": f"{enrichment.VLM_MODEL}+place@ollama"},
+                    parent_event_ids=[kf_eid], root_event_id=kf["rootEventId"], input_event_ids=[kf_eid],
+                ):
+                    emitted += 1
+    return {"ok": True, "recurringCells": len(recurring), "observations": emitted}
+
+
+place_queue: "queue.Queue[int]" = queue.Queue()
+
+
+def place_worker() -> None:
+    while True:
+        _ = place_queue.get()
+        try:
+            out = resolve_places()
+            print(f"resolved places: {out}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"place resolution failed: {exc}", flush=True)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=place_worker, daemon=True, name="place").start()
+
+
+@app.post("/resolve-places")
+def resolve_places_endpoint(authorization: str | None = Header(None)) -> dict:
+    """Queue VLM description of the most-revisited recurring GPS cells."""
+    check_auth(authorization)
+    place_queue.put(1)
+    return {"ok": True, "queued": True}
 
 
 # --- Open-vocabulary item identification (what the COCO detector can't name) ---
