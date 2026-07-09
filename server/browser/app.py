@@ -273,16 +273,24 @@ def api_entities() -> JSONResponse:
             "sessionCount": len(sessions),
             "usuallyAt": next((m["usuallyAt"] for m in ms if m["usuallyAt"]), None),
         })
-    # recurring but still-unnamed clusters become pseudonymous entities
-    for cid, _ in recurs.items():
+    # Every other observed cluster is a pseudonymous entity (unnamed face/voice/
+    # vehicle) — so the view is the full identity list, not just named/recurring
+    # ones. recurs conclusions only enrich the confidence; the cluster stats are
+    # the ground truth of what was actually observed.
+    for cid in stats:
         if cid in best_name:
             continue
         m = member(cid)
         entities.append({
             "name": None, "pseudonym": cid, "members": [m], "modalities": [m["modality"]],
-            "sessions": m["sessions"], "sessionCount": len(m["sessions"]), "usuallyAt": m["usuallyAt"],
+            "sessions": m["sessions"], "sessionCount": len(m["sessions"]),
+            "usuallyAt": m["usuallyAt"], "recurs": recurs.get(cid, 0),
         })
-    entities.sort(key=lambda e: -e["sessionCount"])
+    # Named first, then by recurrence, then by how much was observed.
+    entities.sort(key=lambda e: (
+        0 if e["name"] else 1, -e["sessionCount"],
+        -sum(m["observations"] for m in e["members"]),
+    ))
     return JSONResponse(entities)
 
 
@@ -615,8 +623,8 @@ function openEntity(e){
   const names=Object.entries(m.names).sort((a,b)=>b[1]-a[1]);
   const nh=names.map(([n,c])=>`<div class=emeta>${escape(n)} — conf ${c}<div class=bar><i style="width:${c/10}%"></i></div></div>`).join('');
   const ml=m.usuallyAt?`<div class=emeta>usually-at ${mapsLink(m.usuallyAt.loc)}</div>`:'';
-  const mm=el(`<div class=member><span class="k derived">${m.cluster}</span> <span class=emeta>${m.observations} obs · ${m.sessions.length} sessions</span>${nh?'<div style="margin-top:4px">'+nh+'</div>':''}${ml}<div class=lnk style="margin-top:3px">view observations ▸</div></div>`);
-  mm.querySelector('.lnk').onclick=()=>openCluster(m.cluster);
+  const mm=el(`<div class=member><span class="k derived">${m.cluster}</span> <span class=emeta>${m.observations} obs · ${m.sessions.length} sessions</span>${nh?'<div style="margin-top:4px">'+nh+'</div>':''}${ml}</div>`);
+  const vo=el('<div class=lnk style="margin-top:3px">view observations ▸</div>'); vo.onclick=()=>openCluster(m.cluster); mm.appendChild(vo);
   M.appendChild(mm);
  });
  if(e.sessions.length){
