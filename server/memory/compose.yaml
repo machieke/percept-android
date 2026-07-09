@@ -15,7 +15,9 @@ services:
       - OLLAMA_URL=http://127.0.0.1:11434
       - VLM_MODEL=gemma3:4b
       - LLM_MODEL=gemma3:4b
-      # - ENRICH_ENABLED=0         # disable VLM/LLM enrichment
+      - REASON_INTERVAL_S=900     # tier 1: cheap reasoning sweep cadence (entities/conclusions)
+      - AUTO_DERIVE=1             # tier 2: auto-run per-session derivations on new sessions
+      # - ENRICH_ENABLED=0         # disable VLM/LLM enrichment (also gates the periodic worker)
       # - MEMORY_TOKEN=change-me   # uncomment to require a bearer token
     restart: unless-stopped
 

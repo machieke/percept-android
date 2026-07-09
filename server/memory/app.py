@@ -17,6 +17,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import urllib.request
 import zipfile
 from io import BytesIO
@@ -842,12 +843,10 @@ def emit_conclusion(reasoner_id: str, conclusion: dict) -> str | None:
     return ingested.event_id if ingested else None
 
 
-@app.post("/reason")
-def reason_endpoint(authorization: str | None = Header(None)) -> dict:
+def run_reasoning() -> dict:
     """Run every reasoner over the current trace and emit conclusion events.
     Idempotent by content address: an unchanged conclusion deduplicates, a
     changed truth value lands as a new revisable conclusion."""
-    check_auth(authorization)
     evidence = gather_reasoning_evidence()
     emitted = []
     for reasoner_id, conclusion in reasoning.run_all(evidence):
@@ -861,6 +860,12 @@ def reason_endpoint(authorization: str | None = Header(None)) -> dict:
             }
         )
     return {"ok": True, "conclusions": emitted}
+
+
+@app.post("/reason")
+def reason_endpoint(authorization: str | None = Header(None)) -> dict:
+    check_auth(authorization)
+    return run_reasoning()
 
 
 @app.get("/entities")
@@ -1260,6 +1265,115 @@ def identify_vehicles_endpoint(sessionId: str, authorization: str | None = Heade
     check_auth(authorization)
     vehicle_queue.put(sessionId)
     return {"ok": True, "queued": sessionId}
+
+
+# --- Continuous derivation: keep entities/conclusions current on a schedule ---
+
+REASON_INTERVAL_S = int(os.environ.get("REASON_INTERVAL_S", "900"))   # tier 1: cheap reasoning sweep
+AUTO_DERIVE = os.environ.get("AUTO_DERIVE", "1") == "1"               # tier 2: per-session VLM derivations
+
+
+def _sessions_by_kind(*kinds: str) -> dict:
+    """Which sessions contain events of each kind (channelPath[1])."""
+    out = {k: set() for k in kinds}
+    for k in kinds:
+        for event_id in index.by_kind(k).get("eventIds", []):
+            p = _pointer(event_id)
+            if not p:
+                continue
+            cp = p.get("channelPath") or []
+            if len(cp) >= 2 and cp[0] == "perception":
+                out[k].add(cp[1])
+    return out
+
+
+def enqueue_session_derivations() -> dict:
+    """Tier 2: enqueue each per-session derivation ONCE, gated by applicability
+    and by whether its output already exists — so a new session is derived
+    automatically without re-hammering the CPU-only VLM on every tick.
+
+    The VLM-heavy passes (name reads, glow attribution) only auto-run where tile
+    geometry has been configured, i.e. a known on-screen/meeting session — that
+    keeps the shared ollama from being saturated reading faces in arbitrary
+    scenes; any session can still be resolved by hand via the endpoints. Vehicle
+    re-id is CPU-cheap (no VLM), so it auto-runs wherever there are vehicles."""
+    present = _sessions_by_kind(
+        "face-observation", "vehicle-observation", "identity-resolution",
+        "speaker-attribution", "session-stop",
+    )
+    complete = present["session-stop"]          # only derive finished sessions
+    tiled = {p.stem[len("tiles-"):] for p in DATA_ROOT.glob("tiles-*.json")}
+    # Sessions that actually contain cars/trucks/buses.
+    veh_sessions = set()
+    for event_id in index.by_kind("track-segment").get("eventIds", []):
+        p = _pointer(event_id)
+        if p and _payload(p).get("label") in ("car", "truck", "bus"):
+            cp = p.get("channelPath") or []
+            if len(cp) >= 2:
+                veh_sessions.add(cp[1])
+
+    # Persisted attempted-set so a session that yields no output (e.g. all
+    # vehicles too small to crop) is not re-attempted every tick.
+    done = _load_derived_state()
+    queued = {"resolve": [], "attribute": [], "vehicle": []}
+    marks = []
+
+    def enqueue(kind: str, q: "queue.Queue", sids: set) -> None:
+        for sid in sorted(sids & complete):
+            key = f"{sid}:{kind}"
+            if key in done:
+                continue
+            q.put(sid)
+            queued[kind].append(sid)
+            marks.append(key)
+
+    enqueue("resolve", resolve_queue, (tiled & present["face-observation"]) - present["identity-resolution"])
+    enqueue("attribute", attribute_queue, tiled - present["speaker-attribution"])
+    enqueue("vehicle", vehicle_queue, veh_sessions - present["vehicle-observation"])
+    if marks:
+        _save_derived_state(done | set(marks))
+    return queued
+
+
+def _load_derived_state() -> set:
+    try:
+        return set(json.loads((DATA_ROOT / "derivation-state.json").read_text()))
+    except Exception:
+        return set()
+
+
+def _save_derived_state(keys: set) -> None:
+    (DATA_ROOT / "derivation-state.json").write_text(json.dumps(sorted(keys)))
+
+
+def periodic_worker() -> None:
+    """Run the cheap reasoning sweep on an interval and, when AUTO_DERIVE is on,
+    enqueue any new session's per-session derivations first so they fold in on
+    the next passes. Reasoning is content-addressed, so unchanged conclusions
+    dedup and this is free when nothing changed."""
+    last_count = -1
+    time.sleep(60)  # startup grace: let the index finish replaying
+    while True:
+        try:
+            if AUTO_DERIVE:
+                q = enqueue_session_derivations()
+                if any(q.values()):
+                    print(f"auto-derive queued: {q}", flush=True)
+            count = sum(len(index.by_kind(k).get("eventIds", []))
+                        for k in ("face-observation", "speaker-observation", "vehicle-observation",
+                                  "identity-resolution", "speaker-attribution", "asr-segment"))
+            if count != last_count:
+                out = run_reasoning()
+                new = sum(1 for c in out["conclusions"] if c["new"])
+                print(f"periodic reasoning: {new} new conclusions ({count} identity/asr events)", flush=True)
+                last_count = count
+        except Exception as exc:  # noqa: BLE001
+            print(f"periodic worker error: {exc}", flush=True)
+        time.sleep(REASON_INTERVAL_S)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=periodic_worker, daemon=True, name="periodic").start()
 
 
 @app.post("/retranscribe")
