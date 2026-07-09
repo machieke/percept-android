@@ -407,11 +407,11 @@ def api_crop(event_id: str) -> Response:
     x1, y1, x2, y2 = (int(v) for v in box)
     pw, ph = int((x2 - x1) * 0.2), int((y2 - y1) * 0.2)   # a little context around the box
     crop = im.crop((max(0, x1 - pw), max(0, y1 - ph), min(W, x2 + pw), min(H, y2 + ph)))
-    if crop.width and crop.width < 240:                   # upscale tiny crops for visibility
-        scale = 240 / crop.width
+    if crop.width and crop.width < 384:                   # upscale small crops (Lanczos beats the browser's)
+        scale = 384 / crop.width
         crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS)
     buf = io.BytesIO()
-    crop.save(buf, format="JPEG", quality=90)
+    crop.save(buf, format="JPEG", quality=95)              # avoid a lossy second JPEG pass over an already-small face
     return Response(content=buf.getvalue(), media_type="image/jpeg")
 
 
