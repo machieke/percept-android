@@ -666,7 +666,7 @@ def gather_reasoning_evidence() -> dict:
         if hit and hit["name"]:
             speaker_names[cid].append(hit)
 
-    return {
+    evidence = {
         "resolutions": resolutions,
         "cluster_sessions": cluster_sessions,
         "cluster_event_ids": cluster_event_ids,
@@ -674,6 +674,113 @@ def gather_reasoning_evidence() -> dict:
         "speaker_utterance_ids": speaker_utterance_ids,
         "speaker_names": speaker_names,
         "roster": load_roster(),
+    }
+    evidence.update(gather_association_evidence())
+    return evidence
+
+
+def gather_association_evidence() -> dict:
+    """Cross-modal aggregates for the entity-resolution reasoners: each cluster's
+    resolved name (from accumulated has-name conclusions), the modality it lives
+    in, the GPS locations where it was observed, and face<->voice temporal
+    co-occurrence with the marginals needed for a PMI (lift) guard so a
+    video-call grid — where every face is always on screen — does not produce
+    spurious bindings."""
+    import bisect
+    import collections
+
+    # Each cluster's current best name, from the accumulated has-name conclusions
+    # (weight competing names by confidence; keep them all for honesty).
+    name_conf = collections.defaultdict(dict)
+    for event_id in index.by_kind("conclusion").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        pl = _payload(p)
+        if pl.get("predicate") != "has-name":
+            continue
+        cur = name_conf[pl["subjectId"]].get(pl["object"], 0)
+        name_conf[pl["subjectId"]][pl["object"]] = max(cur, pl.get("confidencePerMille", 0))
+    cluster_name = {cid: max(v, key=v.get) for cid, v in name_conf.items() if v}
+
+    # Location fixes per session (sorted) for nearest-in-time lookup.
+    fixes = collections.defaultdict(list)
+    for event_id in index.by_kind("location-fix").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        pl = _payload(p)
+        if pl.get("latE7") is not None:
+            fixes[pl["sessionId"]].append((pl.get("tNanos", 0), pl["latE7"], pl["lonE7"]))
+    for sid in fixes:
+        fixes[sid].sort()
+    fix_times = {sid: [f[0] for f in arr] for sid, arr in fixes.items()}
+
+    def nearest_fix(sid: str, t: int):
+        arr = fixes.get(sid)
+        if not arr:
+            return None
+        i = bisect.bisect_left(fix_times[sid], t)
+        cand = [arr[j] for j in (i - 1, i) if 0 <= j < len(arr)]
+        if not cand:
+            return None
+        best = min(cand, key=lambda f: abs(f[0] - t))
+        return (best[1], best[2])
+
+    # Per-cluster observation times + per-session face/speaker streams.
+    cluster_latlon = collections.defaultdict(list)
+    face_obs = collections.defaultdict(list)   # sid -> [(t, faceCluster)]
+    spk_obs = collections.defaultdict(list)    # sid -> [(t0, t1, speakerCluster)]
+    for event_id in index.by_kind("face-observation").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        pl = _payload(p)
+        t = pl.get("tNanos", 0)
+        face_obs[pl["sessionId"]].append((t, pl["clusterId"]))
+        fx = nearest_fix(pl["sessionId"], t)
+        if fx:
+            cluster_latlon[pl["clusterId"]].append(fx)
+    for kind, tfield in (("speaker-observation", "tStartNanos"), ("vehicle-observation", "tNanos")):
+        for event_id in index.by_kind(kind).get("eventIds", []):
+            p = _pointer(event_id)
+            if not p:
+                continue
+            pl = _payload(p)
+            t = pl.get(tfield, 0)
+            if kind == "speaker-observation":
+                spk_obs[pl["sessionId"]].append((pl.get("tStartNanos", t), pl.get("tEndNanos", t), pl["clusterId"]))
+            fx = nearest_fix(pl["sessionId"], t)
+            if fx:
+                cluster_latlon[pl["clusterId"]].append(fx)
+
+    # Face<->voice co-occurrence within a window, with marginals for PMI.
+    window = 2_000_000_000
+    cooc = collections.Counter()
+    face_marg = collections.Counter()
+    spk_marg = collections.Counter()
+    total_windows = 0
+    for sid, spks in spk_obs.items():
+        faces = sorted(face_obs.get(sid, []))
+        ftimes = [f[0] for f in faces]
+        for t0, t1, scid in spks:
+            total_windows += 1
+            spk_marg[scid] += 1
+            lo = bisect.bisect_left(ftimes, t0 - window)
+            hi = bisect.bisect_right(ftimes, t1 + window)
+            present = {faces[i][1] for i in range(lo, hi)}
+            for fcid in present:
+                cooc[(fcid, scid)] += 1
+                face_marg[fcid] += 1
+
+    return {
+        "cluster_name": cluster_name,
+        "cluster_name_conf": {cid: v for cid, v in name_conf.items() if v},
+        "cluster_latlon": cluster_latlon,
+        "cooc": cooc,
+        "cooc_face_marg": face_marg,
+        "cooc_spk_marg": spk_marg,
+        "cooc_total": total_windows,
     }
 
 
@@ -690,8 +797,11 @@ def load_roster() -> list:
 
 
 def emit_conclusion(reasoner_id: str, conclusion: dict) -> str | None:
+    # Evidence may include synthetic "cluster:<id>" placeholders when a reasoner
+    # binds clusters rather than events; only real event ids become causal links.
+    real_parents = [c for c in conclusion["evidenceEventIds"] if isinstance(c, str) and c.startswith("event:")][:32]
     now = "2026-01-01T00:00:00Z"
-    for cid in conclusion["evidenceEventIds"]:
+    for cid in real_parents:
         p = _pointer(cid)
         if p:
             now = _payload(p).get("observedAt", now)
@@ -726,8 +836,8 @@ def emit_conclusion(reasoner_id: str, conclusion: dict) -> str | None:
             },
             # Conclusions are causally grounded in their evidence but span
             # sessions, so they self-root (rootEventId = own eventId).
-            parent_event_ids=conclusion["evidenceEventIds"][:32],
-            input_event_ids=conclusion["evidenceEventIds"][:32],
+            parent_event_ids=real_parents,
+            input_event_ids=real_parents,
         )
     return ingested.event_id if ingested else None
 
@@ -751,6 +861,45 @@ def reason_endpoint(authorization: str | None = Header(None)) -> dict:
             }
         )
     return {"ok": True, "conclusions": emitted}
+
+
+@app.get("/entities")
+def list_entities(authorization: str | None = Header(None)) -> dict:
+    """The resolved entity graph, assembled live: each named entity with the
+    per-modality clusters bound to it (face / voice / vehicle), its competing
+    name candidates with confidence, the sessions it recurs across, and where it
+    is usually observed. This is the cross-modal 'who/what is this' view the
+    association reasoners deduce."""
+    check_auth(authorization)
+    ev = gather_reasoning_evidence()
+    cluster_name = ev["cluster_name"]
+    name_conf = ev["cluster_name_conf"]
+    sessions = ev["cluster_sessions"]
+    latlon = ev["cluster_latlon"]
+    by_name: dict = {}
+    for cid, nm in cluster_name.items():
+        by_name.setdefault(nm, []).append(cid)
+    entities = []
+    for name, members in sorted(by_name.items()):
+        members = sorted(members)
+        pts = [p for m in members for p in latlon.get(m, [])]
+        loc = None
+        if len(pts) >= 3:
+            lat = sorted(p[0] for p in pts)[len(pts) // 2]
+            lon = sorted(p[1] for p in pts)[len(pts) // 2]
+            loc = {"lat": round(lat / 1e7, 5), "lon": round(lon / 1e7, 5), "fixes": len(pts)}
+        sess = sorted(set().union(*[sessions.get(m, set()) for m in members])) if members else []
+        entities.append({
+            "name": name,
+            "members": members,
+            "modalities": sorted({m.split("-")[0] for m in members}),
+            "sessions": sess,
+            "sessionCount": len(sess),
+            "usuallyAt": loc,
+            "nameCandidates": {m: name_conf.get(m, {}) for m in members},
+        })
+    entities.sort(key=lambda e: -e["sessionCount"])
+    return {"ok": True, "entities": entities}
 
 
 @app.get("/roster")

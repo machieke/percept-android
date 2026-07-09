@@ -18,6 +18,7 @@ prior conclusions remain as revisable history, parented to their evidence.
 
 import collections
 import os
+import re
 
 EVIDENTIAL_HORIZON = 1  # NAL k: one more counterexample would halve certainty growth
 
@@ -214,11 +215,159 @@ def speaker_name_conclusions(evidence: dict) -> list[dict]:
     return out
 
 
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "unknown"
+
+
+def entity_conclusions(evidence: dict) -> list[dict]:
+    """Cross-modal entity resolution: unify the per-modality clusters (face /
+    voice / vehicle) that resolve to the same name into one entity, and bind the
+    cross-modal pairs with same-as. A name is the strongest bridge available —
+    a face read off a caption and a voice named by the active-speaker glow that
+    share a name are the same person. Confidence grows with how many sessions
+    the entity recurs across."""
+    cluster_name = evidence.get("cluster_name") or {}
+    cluster_sessions = evidence.get("cluster_sessions") or {}
+    cluster_event_ids = evidence.get("cluster_event_ids") or {}
+    out = []
+    by_name = collections.defaultdict(list)
+    for cid, nm in cluster_name.items():
+        by_name[nm].append(cid)
+    for name, members in by_name.items():
+        members = sorted(members)
+        modalities = sorted({m.split("-")[0] for m in members})
+        sessions = set().union(*[cluster_sessions.get(m, set()) for m in members]) if members else set()
+        n_sessions = max(1, len(sessions))
+        frequency, confidence = nal_truth(n_sessions, n_sessions)
+        evidence_ids = [e for m in members for e in cluster_event_ids.get(m, [])[:3]]
+        out.append(
+            {
+                "subjectKind": "entity",
+                "subjectId": _slug(name),
+                "predicate": "unifies",
+                "object": name,
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": len(members),
+                "totalEvidence": len(members),
+                "statement": (
+                    f"entity '{name}' = {', '.join(members)} "
+                    f"({'+'.join(modalities)}; {len(sessions)} sessions)"
+                ),
+                "evidenceEventIds": evidence_ids or [f"cluster:{m}" for m in members],
+            }
+        )
+        # Explicit cross-modal bindings.
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                if members[i].split("-")[0] == members[j].split("-")[0]:
+                    continue
+                out.append(
+                    {
+                        "subjectKind": members[i].split("-")[0],
+                        "subjectId": members[i],
+                        "predicate": "same-as",
+                        "object": members[j],
+                        "frequencyPerMille": frequency,
+                        "confidencePerMille": confidence,
+                        "positiveEvidence": len(sessions),
+                        "totalEvidence": len(sessions),
+                        "statement": f"{members[i]} same-as {members[j]} (both resolve to '{name}')",
+                        "evidenceEventIds": evidence_ids or [f"cluster:{members[i]}", f"cluster:{members[j]}"],
+                    }
+                )
+    return out
+
+
+def location_conclusions(evidence: dict) -> list[dict]:
+    """Where an identity is usually observed: the median of the GPS fixes in
+    effect at its observation times."""
+    latlon = evidence.get("cluster_latlon") or {}
+    cluster_event_ids = evidence.get("cluster_event_ids") or {}
+    out = []
+    for cid, pts in latlon.items():
+        if len(pts) < 3:
+            continue
+        lat = sorted(p[0] for p in pts)[len(pts) // 2]
+        lon = sorted(p[1] for p in pts)[len(pts) // 2]
+        frequency, confidence = nal_truth(len(pts), len(pts))
+        out.append(
+            {
+                "subjectKind": cid.split("-")[0],
+                "subjectId": cid,
+                "predicate": "usually-at",
+                "object": f"{lat / 1e7:.5f},{lon / 1e7:.5f}",
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": len(pts),
+                "totalEvidence": len(pts),
+                "statement": f"{cid} usually-at ({lat / 1e7:.5f}, {lon / 1e7:.5f}) ({len(pts)} fixes)",
+                "evidenceEventIds": cluster_event_ids.get(cid, [])[:4] or [f"cluster:{cid}"],
+            }
+        )
+    return out
+
+
+def cooccurrence_conclusions(evidence: dict) -> list[dict]:
+    """Bind a face cluster to a voice cluster when they co-occur in time far
+    above chance — the person visible when a voice sounds. A PMI (lift) guard
+    plus a specificity floor keeps a video-call grid (every face always on
+    screen, so every pair co-occurs) from producing spurious bindings; there the
+    lift is ~1 and nothing fires."""
+    cooc = evidence.get("cooc") or {}
+    face_marg = evidence.get("cooc_face_marg") or {}
+    spk_marg = evidence.get("cooc_spk_marg") or {}
+    total = evidence.get("cooc_total") or 0
+    out = []
+    if total < 10:
+        return out
+    # Group by voice and rank faces by how often they are on screen while it
+    # speaks. Bind a voice to its top face ONLY if that face clearly dominates
+    # the runner-up (specificity margin) — on a video-call grid every face is
+    # present in every window, so top ≈ runner-up and nothing binds. A real
+    # in-person scene has one face present when the voice sounds.
+    by_spk = collections.defaultdict(list)
+    for (face, spk), c in cooc.items():
+        by_spk[spk].append((face, c))
+    for spk, faces in by_spk.items():
+        faces.sort(key=lambda x: -x[1])
+        top_face, top_c = faces[0]
+        n = spk_marg.get(spk, 0)
+        if n < 1:
+            continue
+        share1 = top_c / n
+        share2 = faces[1][1] / n if len(faces) > 1 else 0.0
+        lift = (top_c * total) / max(1e-9, face_marg.get(top_face, 0) * n)
+        if top_c >= 8 and share1 >= 0.6 and (share1 - share2) >= 0.25 and lift >= 1.5:
+            frequency, confidence = nal_truth(top_c, n)
+            out.append(
+                {
+                    "subjectKind": "face",
+                    "subjectId": top_face,
+                    "predicate": "same-as",
+                    "object": spk,
+                    "frequencyPerMille": frequency,
+                    "confidencePerMille": confidence,
+                    "positiveEvidence": top_c,
+                    "totalEvidence": n,
+                    "statement": (
+                        f"{top_face} same-as {spk} (uniquely co-present in "
+                        f"{frequency / 10:.0f}% of utterances, lift {lift:.1f})"
+                    ),
+                    "evidenceEventIds": [f"cluster:{top_face}", f"cluster:{spk}"],
+                }
+            )
+    return out
+
+
 REASONERS = {
     "identity-namer-v0": name_conclusions,
     "recurrence-v0": recurrence_conclusions,
     "language-v0": language_conclusions,
     "speaker-namer-v0": speaker_name_conclusions,
+    "entity-resolver-v0": entity_conclusions,
+    "location-binder-v0": location_conclusions,
+    "cooccurrence-binder-v0": cooccurrence_conclusions,
 }
 
 
