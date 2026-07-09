@@ -1,6 +1,6 @@
 # percept-android
 
-A phone that perceives, and a server that remembers — and recognizes.
+A phone that perceives, and a server that remembers, recognizes — and reasons.
 
 The Android app runs local perception over live camera, microphone, and the
 phone's sensor suite, recording everything as content-addressed,
@@ -11,9 +11,14 @@ camera pointing direction, ambient light, pocket state, network identity,
 and power. Events stream to a self-hosted memory server within a second of
 happening. The server accumulates the trace continuously, transcribes the
 archival audio at server-model quality, captions keyframes with a VLM,
-corrects transcripts using visual context, and clusters voices and faces
-into persistent pseudonymous identities. The phone is a lean buffer: once
-the server acknowledges an event, the phone sheds its artifacts.
+corrects transcripts using visual context, and clusters voices, faces, and
+vehicles into persistent pseudonymous identities. Above the observations, a
+reasoning layer accumulates **conclusions** — named identities, cross-modal
+entities, recurring places, candidate changes — each carried as a trace
+event with an explicit truth value, revised as evidence accumulates. The
+phone is a lean buffer: once the server acknowledges an event, the phone
+sheds its artifacts. A read-only web browser over the trace shows every
+event, entity, item, and conclusion, linked back to its evidence.
 
 ## Why it matters
 
@@ -40,9 +45,25 @@ layer exploits exactly that: some transcription errors are acoustically
 unfixable (Dutch final devoicing makes *mosterd* sound like *mostert*), and
 only temporally-aligned visual context can recover them.
 
-**Identity without a leak.** Voices and faces are embedded server-side and
-clustered into pseudonymous ids (`speaker-4`, `face-1`) that recur across
-sessions; names are attached only when you label a cluster. The biometric
+**Understanding accumulates like perception.** Server-side reasoners scan the
+evidence and emit `conclusion` events carrying a Non-Axiomatic-Logic truth
+value — a `{frequency, confidence}` pair, integer per-mille — causally
+parented to the exact events they were drawn from. Nothing is hand-labeled:
+a name is a conclusion the reasoner became confident about (on-screen
+caption reads, roster-snapped, voted); a person is a face cluster and a
+voice cluster bound by evidence; a place is a revisited GPS cell; a change
+is a diff between passes. Conclusions are content-addressed like everything
+else, so re-running a reasoner dedups unchanged truths and lands revised
+ones as new revisable history — competing interpretations coexist with
+honest provenance. Weak evidence stays honest: modalities whose embeddings
+are known to over-merge (far-field voices, classical vehicle appearance)
+carry a larger evidential horizon, and an entity resting only on them is
+flagged uncorroborated until a reliable modality (a face) supports it.
+
+**Identity without a leak.** Voices, faces, and vehicles are embedded
+server-side and clustered into pseudonymous ids (`speaker-4`, `face-1`,
+`vehicle-12`) that recur across sessions; names attach only when you label a
+cluster or a reasoner concludes one from on-screen evidence. The biometric
 templates live in exactly one file on your own volume — never in the trace,
 never off your infrastructure.
 
@@ -81,17 +102,49 @@ asr-segment ─► voice embedding ─► speaker-observation      SERVER (ident
 keyframes ──► face embeddings ──► face-observation           wespeaker CAM++ voices
 keyframes ──► VLM captions (ollama) ─► scene-caption         insightface faces
 transcripts ─► LLM correction (acoustic-similarity guarded)
+
+DERIVATIONS (auto-run per completed session, or per endpoint)
+track-segments × keyframes ─► vehicle crops ─► appearance clusters ─► vehicle-observation
+meeting keyframes ─► homography-stabilized view ─► active-speaker glow ─► speaker-attribution
+                 └─► super-res-stacked captions ─► on-screen name reads ─► identity-resolution
+keyframes ─► open-vocab VLM inventory ─► item-observation (brands/labels read)
+prominent COCO tracks ─► VLM re-label ─► object-observation ("carrot" → flower pot)
+revisited GPS cells (adjacent-merged) ─► per-pass VLM description ─► place-observation
+                                          (spot vs drive-by, speed + bearing recorded)
+
+REASONING (periodic sweep, conclusion events with NAL {frequency, confidence})
+identity-namer      name reads, roster-snapped + voted   →  face-2 has-name '…'
+speaker-namer       glow attribution joined to voice     →  speaker-2 has-name '…'
+entity-resolver     same name across modalities          →  face↔voice same-as, one entity
+recurrence          cluster seen across sessions         →  recurring entity (weak modalities
+                                                            demand more evidence)
+location-binder     GPS fix at observation times         →  usually-at (lat,lon)
+place-recurrence    revisited GPS cells                  →  place revisited in N sessions
+place-change        stable-feature diff, same bearing    →  candidate change (capped conf)
+item-recurrence     named item across sessions           →  persistent object in a space
+
+BROWSER (:8131, read-only)  sessions · cross-modal timelines · entities · items ·
+image fragments per observation · causal links · conclusions · map links
 ```
 
 Live speech recognition is remote-first (the LAN/tailnet Parakeet answers a
 5 s window in ~250 ms) with per-window fallback to on-device Zipformer and
 whisper.cpp. Every model, local or remote, is pinned by sha256 and recorded
-per-event as an `extractionRunId`. Server-side derived events — archival
-transcripts, captions, corrections, speaker/face observations — are causally
+per-event as an `extractionRunId`. Server-side derived events are causally
 parented to the events they derive from; competing interpretations coexist
 in the trace with honest provenance, and `/retranscribe` + `/enrich?force=1`
 re-run improved pipelines over old chunks with content-address dedup making
 identical re-runs free.
+
+Derivations run continuously without intervention: identity embeddings race
+ahead in their own worker (milliseconds per chunk, never queued behind the
+CPU VLM), a periodic worker enqueues each completed session's applicable
+derivations exactly once (vehicles wherever there are car tracks; the
+VLM-heavy name reads and glow attribution only where meeting-tile geometry
+is configured, so a single CPU ollama is never saturated), and the reasoning
+sweep re-runs every `REASON_INTERVAL_S`, folding new evidence into revised
+conclusions. Voiceprints are gated on audio quality: speech overlapping a
+Music tag (car radio) never feeds the speaker registry.
 
 ## Layout
 
@@ -104,10 +157,11 @@ identical re-runs free.
 | `:perception:video` | Detector interface + MediaPipe adapter, IoU tracker, debounced scene gate, sharpness-selected keyframes, thermal governor, CameraX analyzer. |
 | `:perception:audio` | Ring buffer, VAD, ASR window/lag-skip engine, tag RLE, Opus chunk recorder, remote/Zipformer/whisper ASR adapters. |
 | `:dispatch` | Bundle exporter/uploader, live event streamer, WorkManager workers, post-ACK retention. |
-| `:app` | Foreground service, session controller, sensor trackers (location, motion, pose, environment, network, power), Compose UI. |
+| `:app` | Foreground service, session controller, sensor trackers (location, motion, pose, environment, network, power), Compose UI with capture-quality knobs. |
 | `server/asr` | Docker compose: Parakeet via sherpa-onnx; PCM window + compressed-file transcription with speech-region segmentation. |
-| `server/memory` | Docker compose: bundle/event ingest with CID verification, persistent DA + replayed index, archival transcription, VLM/LLM enrichment, identity clustering + registry, `/label`, `/identities`, `/retranscribe`. |
+| `server/memory` | Docker compose: bundle/event ingest with CID verification, persistent DA + replayed index, archival transcription, VLM/LLM enrichment, identity clustering + registry (`identity.py`), speaker attribution from meeting screens (`attribute.py`), vehicle re-id (`vehicle.py`), open-vocab items, place resolution, and the reasoning layer (`reason.py`) with its periodic scheduler. |
 | `server/ident` | Docker compose: stateless voice (wespeaker CAM++) and face (insightface) embedding endpoints. |
+| `server/browser` | Docker compose: read-only single-page trace browser on the memory volume (`:ro`) — sessions, timelines, entities, items, observation image crops, causal links, DMS map links. |
 
 ## Building and verifying
 
@@ -127,14 +181,24 @@ start):
 (cd server/asr && docker compose up -d)      # :8123 transcription
 (cd server/ident && docker compose up -d)    # :8125 voice/face embeddings
 (cd server/memory && docker compose up -d)   # :8124 memory, host networking
+(cd server/browser && docker compose up -d)  # :8131 trace browser (read-only)
 ```
 
 Enrichment needs an [ollama](https://ollama.com) instance with a vision model
 (`ollama pull gemma3:4b` by default; configure via `VLM_MODEL`/`LLM_MODEL`).
-Identity clustering thresholds are env-tunable
-(`SPEAKER_SIM_THRESHOLD`/`FACE_SIM_THRESHOLD`); label clusters with
-`POST /label?clusterId=speaker-4&name=...` and inspect them with
-`GET /identities`.
+Identity clustering thresholds are env-tunable (`SPEAKER_SIM_THRESHOLD` /
+`FACE_SIM_THRESHOLD` / `VEHICLE_SIM_THRESHOLD`), the reasoning cadence via
+`REASON_INTERVAL_S`, and auto-derivation via `AUTO_DERIVE` / `AUTO_ITEMS`.
+
+The memory server's surface beyond ingest: `GET /entities` (the resolved
+cross-modal graph), `GET /conclusions`, `POST /reason`, `GET /identities` +
+`POST /label`, `POST /roster` (known-contact names the reasoners snap noisy
+reads to), `POST /tiles` (meeting-grid geometry per session), and per-session
+derivation triggers — `/resolve-names`, `/attribute-speakers`,
+`/identify-vehicles`, `/identify-items`, `/reclassify-tracks`,
+`/resolve-places`, `/retranscribe`, `/enrich`. See
+[docs/querying.md](docs/querying.md) for recall patterns and
+`scripts/recall.py` for cross-modal queries over the store.
 
 On the phone, set **Remote ASR URL** to the ASR server and **Sync endpoint
 URL** to the memory server (tailnet addresses recommended). Camera, mic, and
@@ -148,11 +212,24 @@ is needed anywhere.
 
 ## Status
 
-Functionally complete and field-validated on the target device (Moto G84
-5G) — see [docs/validation-report.md](docs/validation-report.md) for
-measured results: reference-verified bundles, the ASR RTF progression from
-6.6 on-device to 0.05 remote, roaming Wi-Fi→5G sessions, pocket transitions
-corroborated by two sensors, cross-session speaker recognition, and the
-first face in the registry. Remaining: formal performance/thermal soak
-benchmarks, periodic identity re-clustering to merge fragmented voice
-clusters, and continued enrichment quality tuning.
+Functionally complete and field-validated on the target device (Moto G84 5G)
+across meetings (cameras on and off), dashcam drives, a mall stress test,
+in-car and walkthrough sessions — see
+[docs/validation-report.md](docs/validation-report.md). Measured results
+include reference-verified bundles, the ASR RTF progression from 6.6
+on-device to 0.05 remote, roaming Wi-Fi→5G sessions, cross-session speaker
+and face recurrence (the same meeting participants recognized across
+separately recorded sessions), speaker↔name attribution from the
+active-speaker glow on a cameras-off call, GPS-anchored recurring places,
+and open-vocabulary shed inventory (38 labeled items where the COCO detector
+produced only confabulations).
+
+Known limits, deliberately represented rather than hidden: far-field voice
+embeddings and the classical vehicle appearance descriptor over-merge, so
+their recurrence is down-weighted and flagged until corroborated (a deep
+vehicle-reID model and cleaner per-speaker audio are the upgrades — both are
+single swap points); small screen-photographed faces and license plates sit
+at the capture-resolution ceiling; the CPU-only ollama is the enrichment
+throughput bottleneck (a GPU is the fix); and place change detection emits
+capped-confidence *candidates*, since single-frame VLM variance is
+indistinguishable from real change.
