@@ -417,76 +417,154 @@ def _norm_item(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", s).strip().rstrip("s")
 
 
-def place_conclusions(evidence: dict) -> list[dict]:
-    """A GPS cell (~11m) revisited across sessions is the same place — a static
-    building/landmark re-identified by location (reliable, full confidence,
-    unlike appearance embeddings). Named from any VLM place description."""
-    place_cells = evidence.get("place_cells") or {}
-    place_latlon = evidence.get("place_latlon") or {}
-    place_obs = evidence.get("place_obs") or {}
-    out = []
-    for cell, sessions in place_cells.items():
-        n = len(sessions)
-        if n < 2:
+# Ego-vehicle parts (always present, belong to the observer), transients (sky,
+# passing traffic) and omnipresent generics (vegetation, road surface) — none of
+# these are evidence of a PLACE changing; they dominated the v0 change output.
+_CHANGE_STOPWORDS = {
+    "dashboard", "windshield", "windscreen", "mirror", "steering", "car hood",
+    "bonnet", "seat", "seatbelt", "car interior", "vehicle interior", "wiper",
+    "cloud", "sky", "sun", "sunlight", "shadow", "reflection", "glare",
+    "road", "street", "lane", "marking", "asphalt", "pavement", "curb",
+    "car", "vehicle", "traffic", "van", "truck", "bicycle", "pedestrian", "person",
+    "tree", "foliage", "bush", "hedge", "grass", "field", "vegetation", "plant",
+    "power line", "powerline", "utility pole", "pole", "fence", "wall",
+}
+
+
+def _stable_items(items: list) -> set:
+    out = set()
+    for raw in items:
+        n = _norm_item(raw)
+        if not n or any(sw in n for sw in _CHANGE_STOPWORDS):
             continue
-        obs = place_obs.get(cell, {})
-        names = [d["name"] for d in obs.values() if d.get("name")]
+        out.add(n)
+    return out
+
+
+def _merge_place_groups(evidence: dict) -> list:
+    """Union adjacent ~11m cells so GPS jitter does not fragment one place, then
+    aggregate each group's sessions (recurrence) and per-pass observations."""
+    place_cells = evidence.get("place_cells") or {}
+    place_obs = evidence.get("place_obs") or {}
+    cells = {}
+    for key in set(place_cells) | set(place_obs):
+        try:
+            la, lo = (round(float(x), 4) for x in key.split(","))
+            cells[(la, lo)] = key
+        except ValueError:
+            continue
+    parent = {c: c for c in cells}
+
+    def find(c):
+        while parent[c] != c:
+            parent[c] = parent[parent[c]]
+            c = parent[c]
+        return c
+
+    for (la, lo) in list(cells):
+        for dla in (-1, 0, 1):
+            for dlo in (-1, 0, 1):
+                nb = (round(la + dla * 1e-4, 4), round(lo + dlo * 1e-4, 4))
+                if nb in cells and nb != (la, lo):
+                    parent[find((la, lo))] = find(nb)
+
+    groups = collections.defaultdict(lambda: {"sessions": set(), "obs": {}, "cell": None})
+    for c, key in cells.items():
+        g = groups[find(c)]
+        g["cell"] = g["cell"] or find(c)
+        g["sessions"] |= place_cells.get(key, set())
+        for sid, d in (place_obs.get(key) or {}).items():
+            g["obs"].setdefault(sid, d)
+    return list(groups.values())
+
+
+def place_conclusions(evidence: dict) -> list[dict]:
+    """A GPS location revisited across sessions is the same place — a static
+    building/landmark re-identified by location (reliable, full confidence,
+    unlike appearance embeddings). Adjacent cells are merged so one place is one
+    entity; named from the VLM place descriptions when present."""
+    out = []
+    for g in _merge_place_groups(evidence):
+        n = len(g["sessions"])
+        if n < 2 or not g["cell"]:
+            continue
+        la, lo = g["cell"]
+        names = [d["name"] for d in g["obs"].values() if d.get("name")]
         name = collections.Counter(names).most_common(1)[0][0] if names else None
-        lat, lon = place_latlon.get(cell, (0, 0))
         frequency, confidence = nal_truth(n, n)
         label = f"'{name}' " if name else ""
         out.append(
             {
                 "subjectKind": "place",
-                "subjectId": f"place:{cell}",
+                "subjectId": f"place:{la:.4f},{lo:.4f}",
                 "predicate": "recurs-across-sessions",
                 "object": str(n),
                 "frequencyPerMille": frequency,
                 "confidencePerMille": confidence,
                 "positiveEvidence": n,
                 "totalEvidence": n,
-                "statement": f"place {label}({lat / 1e7:.5f},{lon / 1e7:.5f}) revisited in {n} sessions",
-                "evidenceEventIds": [d["eventId"] for d in obs.values() if d.get("eventId")],
+                "statement": f"place {label}({la:.5f},{lo:.5f}) revisited in {n} sessions",
+                "evidenceEventIds": [d["eventId"] for d in g["obs"].values() if d.get("eventId")],
             }
         )
     return out
 
 
 def change_conclusions(evidence: dict) -> list[dict]:
-    """What changed at a place between passes: items the VLM saw at the cell in
-    one session but not another. Honest and coarse — a difference can be a real
-    change (a van parked/left) or VLM variance, so confidence stays modest."""
-    place_obs = evidence.get("place_obs") or {}
-    place_latlon = evidence.get("place_latlon") or {}
+    """What changed at a place between drive-by passes. Guards learned from v0
+    (whose output was almost entirely noise): ego-vehicle parts, transients and
+    omnipresent generics are excluded; items are matched fuzzily across passes
+    (bigram cosine) so rephrasings are not 'changes'; only drive-by passes that
+    faced roughly the same way (bearing within 60°) are compared; and a diff is
+    only a CANDIDATE change (VLM variance is indistinguishable from real change
+    in a single frame), so confidence is capped low."""
     out = []
-    for cell, obs in place_obs.items():
-        if len(obs) < 2:
+    for g in _merge_place_groups(evidence):
+        passes = {
+            s: d for s, d in g["obs"].items()
+            if d.get("passKind") == "drive-by" and d.get("bearingCentiDeg", -1) >= 0
+        }
+        if len(passes) < 2 or not g["cell"]:
             continue
-        sess_items = {s: {_norm_item(i) for i in d.get("items", []) if _norm_item(i)} for s, d in obs.items()}
-        sessions = sorted(sess_items)
-        common = set.intersection(*sess_items.values())
-        appeared = {s: sorted(sess_items[s] - common) for s in sessions if sess_items[s] - common}
-        if not any(appeared.values()):
-            continue
-        lat, lon = place_latlon.get(cell, (0, 0))
-        parts = "; ".join(f"{s[-6:]}: {', '.join(v[:4])}" for s, v in appeared.items() if v)
-        total = sum(len(v) for v in sess_items.values())
-        positive = total - len(common) * len(sessions)
-        frequency, confidence = nal_truth(max(1, positive), max(1, total), 3)
-        out.append(
-            {
-                "subjectKind": "place",
-                "subjectId": f"place:{cell}",
-                "predicate": "changed",
-                "object": parts[:80],
-                "frequencyPerMille": frequency,
-                "confidencePerMille": confidence,
-                "positiveEvidence": positive,
-                "totalEvidence": total,
-                "statement": f"change at ({lat / 1e7:.5f},{lon / 1e7:.5f}) across passes — {parts}",
-                "evidenceEventIds": [d["eventId"] for d in obs.values() if d.get("eventId")],
-            }
-        )
+        sessions = sorted(passes)
+        for i in range(len(sessions)):
+            for j in range(i + 1, len(sessions)):
+                a, b = sessions[i], sessions[j]
+                dbear = abs(passes[a]["bearingCentiDeg"] - passes[b]["bearingCentiDeg"]) / 100.0
+                dbear = min(dbear, 360 - dbear)
+                if dbear > 60:
+                    continue                      # different heading = different scenery, not change
+                ia = _stable_items(passes[a].get("items", []))
+                ib = _stable_items(passes[b].get("items", []))
+                if not ia and not ib:
+                    continue
+                only_a = {x for x in ia if all(bigram_cosine(x, y) < 0.55 for y in ib)}
+                only_b = {x for x in ib if all(bigram_cosine(x, y) < 0.55 for y in ia)}
+                if not (only_a or only_b):
+                    continue
+                la, lo = g["cell"]
+                parts = "; ".join(
+                    f"{s[-6:]}: {', '.join(sorted(v)[:4])}"
+                    for s, v in ((a, only_a), (b, only_b)) if v
+                )
+                total = len(ia | ib)
+                positive = len(only_a) + len(only_b)
+                frequency, confidence = nal_truth(positive, max(1, total), WEAK_HORIZON)
+                confidence = min(confidence, 500)  # candidate change, not established fact
+                out.append(
+                    {
+                        "subjectKind": "place",
+                        "subjectId": f"place:{la:.4f},{lo:.4f}",
+                        "predicate": "changed",
+                        "object": parts[:80],
+                        "frequencyPerMille": frequency,
+                        "confidencePerMille": confidence,
+                        "positiveEvidence": positive,
+                        "totalEvidence": total,
+                        "statement": f"candidate change at ({la:.5f},{lo:.5f}) — {parts}",
+                        "evidenceEventIds": [passes[a]["eventId"], passes[b]["eventId"]],
+                    }
+                )
     return out
 
 

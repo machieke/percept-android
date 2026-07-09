@@ -103,13 +103,26 @@ def classify_crop(jpeg: bytes) -> str | None:
     return name
 
 
-def describe_and_list_items(jpeg: bytes) -> tuple[str, list]:
+PLACE_PROMPT = (
+    "This photo was taken while passing a location. Describe the PLACE itself, "
+    "ignoring the vehicle interior (dashboard, mirrors, windshield) and "
+    "transient things (sky, clouds, passing traffic). Reply with EXACTLY two "
+    "lines:\n"
+    "Scene: <one short sentence naming the kind of place — e.g. 'a Volkswagen "
+    "dealership on a main road', 'a wooded rural road', 'a brick row house'>\n"
+    "Items: <comma-separated list of the STABLE features you can identify — "
+    "buildings, businesses, signs (read their text), structures, landmarks; "
+    "omit anything too blurry and do not guess>"
+)
+
+
+def describe_and_list_items(jpeg: bytes, prompt: str = None) -> tuple[str, list]:
     """One VLM pass returning (scene sentence, [item names]). Open-vocabulary —
     unlike the fixed COCO detector it names shed/room contents and reads their
     labels ('Hyacinthus', 'Wagner sprayer'). Best-effort parse of the two lines."""
     import re
 
-    raw = _generate(VLM_MODEL, ITEM_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
+    raw = _generate(VLM_MODEL, prompt or ITEM_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
     scene, items = "", []
     for line in raw.splitlines():
         low = line.strip()

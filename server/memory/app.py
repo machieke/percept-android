@@ -832,6 +832,7 @@ def gather_association_evidence() -> dict:
         place_obs[d["cellKey"]][d["sessionId"]] = {
             "name": d.get("name", ""), "items": d.get("items", []),
             "latE7": d.get("latE7"), "lonE7": d.get("lonE7"), "eventId": event_id,
+            "passKind": d.get("passKind"), "bearingCentiDeg": d.get("bearingCentiDeg", -1),
         }
 
     # Open-vocabulary items (VLM), keyed by normalized name across sessions.
@@ -1474,14 +1475,23 @@ def reclassify_tracks_endpoint(sessionId: str, authorization: str | None = Heade
 
 # --- Place resolution: recurring GPS cells = the same building/landmark --------
 
-def resolve_places(max_cells: int = 8) -> dict:
-    """Buildings/landmarks are static, so a GPS cell (~11m) revisited across
-    sessions is the same place — re-identified by location, no fragile appearance
-    embedding. For the most-revisited recurring cells, VLM-describe one keyframe
-    per pass (scene + visible items/signage) and emit a place-observation, so the
-    place reasoner can name it and diff what changed between passes."""
+def resolve_places(max_places: int = 8) -> dict:
+    """Buildings/landmarks are static, so a revisited GPS location is the same
+    place — re-identified by location, no fragile appearance embedding.
+
+    Improvements over v0 (which mostly produced noise): adjacent ~11m cells are
+    MERGED into one place (GPS jitter fragmented home into six cells); the
+    SHARPEST keyframe per pass is described, not the temporally-middle one; each
+    pass records SPEED (a stationary 'spot' like home is an activity venue, a
+    moving 'drive-by' sees streetscape) and BEARING (so the reasoner only diffs
+    passes that faced the same way); and the VLM prompt asks for the PLACE's
+    stable features/signage, explicitly ignoring the vehicle interior and
+    transients."""
     import bisect
     import collections
+
+    import cv2
+    import numpy as np
 
     fixes = collections.defaultdict(list)
     for event_id in index.by_kind("location-fix").get("eventIds", []):
@@ -1490,47 +1500,90 @@ def resolve_places(max_cells: int = 8) -> dict:
             continue
         d = _payload(p)
         if d.get("latE7") is not None:
-            fixes[d["sessionId"]].append((d.get("tNanos", 0), d["latE7"], d["lonE7"]))
+            fixes[d["sessionId"]].append(
+                (d.get("tNanos", 0), d["latE7"], d["lonE7"],
+                 d.get("speedCmPerS", 0), d.get("bearingCentiDeg", -1))
+            )
     for s in fixes:
         fixes[s].sort()
     ftimes = {s: [f[0] for f in arr] for s, arr in fixes.items()}
 
-    def cell_of(sid, t):
+    def fix_at(sid, t):
         arr = fixes.get(sid)
         if not arr:
             return None
         i = bisect.bisect_left(ftimes[sid], t)
         cand = [arr[j] for j in (i - 1, i) if 0 <= j < len(arr)]
-        if not cand:
-            return None
-        f = min(cand, key=lambda x: abs(x[0] - t))
-        return f"{f[1] / 1e7:.4f},{f[2] / 1e7:.4f}", f[1], f[2]
+        return min(cand, key=lambda x: abs(x[0] - t)) if cand else None
 
-    # One representative keyframe per (cell, session): the temporally-middle one.
-    cell_kf = collections.defaultdict(dict)
+    def cell_key(late, lone):
+        return (round(late / 1e7, 4), round(lone / 1e7, 4))
+
+    # Keyframes per raw cell per session, with speed/bearing at capture time.
+    cell_kf = collections.defaultdict(lambda: collections.defaultdict(list))
     for event_id in index.by_kind("scene-change").get("eventIds", []):
         p = _pointer(event_id)
         if not p or not p.get("outputArtifactIds"):
             continue
         d = _payload(p)
-        c = cell_of(d["sessionId"], d.get("tNanos", 0))
-        if not c:
+        f = fix_at(d["sessionId"], d.get("tNanos", 0))
+        if not f:
             continue
-        cell, late, lone = c
-        cell_kf[cell].setdefault(d["sessionId"], []).append((d.get("tNanos", 0), event_id, p["outputArtifactIds"][0], late, lone))
+        _, late, lone, speed, bearing = f
+        cell_kf[cell_key(late, lone)][d["sessionId"]].append(
+            (d.get("tNanos", 0), event_id, p["outputArtifactIds"][0], late, lone, speed, bearing)
+        )
 
-    recurring = sorted(((len(v), c, v) for c, v in cell_kf.items() if len(v) >= 2), key=lambda x: -x[0])
-    emitted = 0
-    for _, cell, per_session in recurring[:max_cells]:
+    # Merge adjacent cells (8-neighbourhood union-find): GPS jitter must not
+    # fragment one place into several cells.
+    parent = {c: c for c in cell_kf}
+
+    def find(c):
+        while parent[c] != c:
+            parent[c] = parent[parent[c]]
+            c = parent[c]
+        return c
+
+    for (la, lo) in list(cell_kf):
+        for dla in (-1, 0, 1):
+            for dlo in (-1, 0, 1):
+                nb = (round(la + dla * 1e-4, 4), round(lo + dlo * 1e-4, 4))
+                if nb in cell_kf and nb != (la, lo):
+                    parent[find((la, lo))] = find(nb)
+
+    groups = collections.defaultdict(lambda: collections.defaultdict(list))
+    for c, per_session in cell_kf.items():
+        g = find(c)
         for sid, kfs in per_session.items():
-            kfs.sort()
-            t_frame, kf_eid, artifact_cid, late, lone = kfs[len(kfs) // 2]   # middle pass keyframe
+            groups[g][sid].extend(kfs)
+
+    def sharpness(artifact_cid):
+        img = cv2.imdecode(np.frombuffer(da.get_bytes(artifact_cid), np.uint8), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return 0.0
+        return float(cv2.Laplacian(img, cv2.CV_64F).var())
+
+    recurring = sorted(((len(v), g, v) for g, v in groups.items() if len(v) >= 2), key=lambda x: -x[0])
+    emitted = 0
+    for _, group, per_session in recurring[:max_places]:
+        place_key = f"{group[0]:.4f},{group[1]:.4f}"
+        for sid, kfs in per_session.items():
+            # Sharpest keyframe of the pass (bounded decode: sample up to 8).
+            step = max(1, len(kfs) // 8)
+            sample = kfs[::step][:8]
+            t_frame, kf_eid, artifact_cid, late, lone, speed, bearing = max(
+                sample, key=lambda k: sharpness(k[2])
+            )
             kf = _pointer(kf_eid)
             if any((ch := _pointer(cid)) and ch["valueKind"] == "place-observation"
                    for cid in index.by_parent(kf_eid).get("eventIds", [])):
                 continue
+            moving = speed >= 200          # >= 2 m/s: a drive-by pass, not a stationary spot
             try:
-                scene, items = enrichment.describe_and_list_items(da.get_bytes(artifact_cid))
+                scene, items = enrichment.describe_and_list_items(
+                    da.get_bytes(artifact_cid),
+                    prompt=enrichment.PLACE_PROMPT if moving else None,
+                )
             except Exception as exc:  # noqa: BLE001
                 print(f"place describe failed for {kf_eid}: {exc}", flush=True)
                 continue
@@ -1538,19 +1591,21 @@ def resolve_places(max_cells: int = 8) -> dict:
             cp = kf["channelPath"]
             with ingest_lock:
                 if ingest_or_skip_duplicate(
-                    raw_payload={"kind": "raw-payload", "schema": "perception-place-v0.1",
-                                 "sessionId": sid, "cellKey": cell, "latE7": late, "lonE7": lone,
+                    raw_payload={"kind": "raw-payload", "schema": "perception-place-v0.2",
+                                 "sessionId": sid, "cellKey": place_key, "latE7": late, "lonE7": lone,
+                                 "passKind": "drive-by" if moving else "spot",
+                                 "speedCmPerS": speed, "bearingCentiDeg": bearing,
                                  "name": scene[:100], "items": items, "tNanos": t_frame, "observedAt": obs_at},
                     observed_at=obs_at, actor_path=["server", "percept-memory", "place-id"],
                     channel_path=[cp[0], cp[1], "place"], value_kind="place-observation",
-                    preview=f"{cell}: {scene[:60]}",
+                    preview=f"{place_key}: {scene[:60]}",
                     provenance={"source": "percept-memory-server", "observedBy": "percept-memory",
                                 "ingestionPipeline": "event-trace-v0",
-                                "extractionRunId": f"{enrichment.VLM_MODEL}+place@ollama"},
+                                "extractionRunId": f"{enrichment.VLM_MODEL}+place-v2@ollama"},
                     parent_event_ids=[kf_eid], root_event_id=kf["rootEventId"], input_event_ids=[kf_eid],
                 ):
                     emitted += 1
-    return {"ok": True, "recurringCells": len(recurring), "observations": emitted}
+    return {"ok": True, "recurringPlaces": len(recurring), "observations": emitted}
 
 
 place_queue: "queue.Queue[int]" = queue.Queue()
@@ -1763,6 +1818,9 @@ def periodic_worker() -> None:
                 q = enqueue_session_derivations()
                 if any(q.values()):
                     print(f"auto-derive queued: {q}", flush=True)
+                # Idempotent: only undescribed passes of recurring places cost a
+                # VLM call, so re-queuing every tick is cheap when nothing is new.
+                place_queue.put(1)
             count = sum(len(index.by_kind(k).get("eventIds", []))
                         for k in ("face-observation", "speaker-observation", "vehicle-observation",
                                   "identity-resolution", "speaker-attribution", "asr-segment"))
