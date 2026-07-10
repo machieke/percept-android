@@ -19,6 +19,7 @@ prior conclusions remain as revisable history, parented to their evidence.
 import collections
 import os
 import re
+import statistics
 
 EVIDENTIAL_HORIZON = 1  # NAL k: one more counterexample would halve certainty growth
 
@@ -568,6 +569,178 @@ def change_conclusions(evidence: dict) -> list[dict]:
     return out
 
 
+# --- Latent-cause reasoners: activities, routines, contexts, associations ----
+
+_HOUR_BANDS = ((5, 11, "morning"), (11, 14, "midday"), (14, 18, "afternoon"), (18, 23, "evening"))
+
+
+def _hour_band(h: int) -> str:
+    for lo, hi, name in _HOUR_BANDS:
+        if lo <= h < hi:
+            return name
+    return "night"
+
+
+def classify_activity(g: dict) -> str:
+    """Rule-based latent activity from a session's observable signature —
+    transparent and debuggable; the class is the hidden common cause that
+    explains why these features co-occur."""
+    if g["driveFrac"] >= 0.3 or g["vehicles"] >= 20:
+        return "DRIVING"
+    if g["faces"] >= 20 and g["speechFrac"] >= 0.2:
+        return "VIDEO-MEETING"
+    if g["speechFrac"] >= 0.25:
+        return "CONVERSATION"
+    if g["speechFrac"] < 0.2 and g["faces"] < 5 and g["vehicles"] < 5:
+        return "QUIET"
+    return "MIXED"
+
+
+def activity_conclusions(evidence: dict) -> list[dict]:
+    """Infer each session's latent activity from its signature. Confidence
+    grows with how much signal the session carried."""
+    out = []
+    for sid, g in (evidence.get("session_signatures") or {}).items():
+        act = classify_activity(g)
+        n = max(1, g.get("signals", 1))
+        frequency, confidence = nal_truth(n, n, 2)
+        detail = (f"drive {g['driveFrac']:.0%}, speech {g['speechFrac']:.0%}, "
+                  f"music {g['musicFrac']:.0%}, faces {g['faces']}, vehicles {g['vehicles']}")
+        out.append(
+            {
+                "subjectKind": "session",
+                "subjectId": sid,
+                "predicate": "is-activity",
+                "object": act,
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": n,
+                "totalEvidence": n,
+                "statement": f"{sid} is-activity {act} ({detail})",
+                "evidenceEventIds": [g["startEventId"]],
+            }
+        )
+    return out
+
+
+def routine_conclusions(evidence: dict) -> list[dict]:
+    """Recurring (activity, time-of-day) pairs across sessions are routines —
+    the latent habit that explains why similar sessions keep appearing at
+    similar hours. Confidence grows with repetitions (and starts honestly low
+    with only days of data)."""
+    sigs = evidence.get("session_signatures") or {}
+    groups = collections.defaultdict(list)
+    for sid, g in sigs.items():
+        groups[(classify_activity(g), _hour_band(g["hour"]))].append((sid, g))
+    out = []
+    for (act, band), members in groups.items():
+        n = len(members)
+        if n < 2 or act in ("MIXED", "QUIET"):
+            continue
+        frequency, confidence = nal_truth(n, n, 2)
+        extras = ""
+        music = [g["musicFrac"] for _, g in members]
+        if act == "DRIVING" and statistics.median(music) > 0.4:
+            extras = ", usually with the radio on"
+        out.append(
+            {
+                "subjectKind": "routine",
+                "subjectId": f"routine:{act.lower()}:{band}",
+                "predicate": "recurs",
+                "object": str(n),
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": n,
+                "totalEvidence": n,
+                "statement": f"routine: {act} in the {band} ({n} sessions{extras})",
+                "evidenceEventIds": [g["startEventId"] for _, g in members][:16],
+            }
+        )
+    return out
+
+
+def context_conclusions(evidence: dict) -> list[dict]:
+    """Which latent context an identity belongs to: the activity class of the
+    sessions a cluster is observed in ('face-52 occurs in VIDEO-MEETING
+    contexts'). Weak-embedding modalities carry the larger horizon."""
+    sigs = evidence.get("session_signatures") or {}
+    out = []
+    for cid, sessions in (evidence.get("cluster_sessions") or {}).items():
+        acts = collections.Counter(
+            classify_activity(sigs[s]) for s in sessions if s in sigs
+        )
+        total = sum(acts.values())
+        if total < 2:
+            continue
+        top, positive = acts.most_common(1)[0]
+        weak = cid.split("-")[0] in WEAK_MODALITIES
+        frequency, confidence = nal_truth(positive, total, WEAK_HORIZON if weak else 2)
+        out.append(
+            {
+                "subjectKind": cid.split("-")[0],
+                "subjectId": cid,
+                "predicate": "occurs-in",
+                "object": top,
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": positive,
+                "totalEvidence": total,
+                "statement": f"{cid} occurs in {top} contexts ({positive}/{total} sessions)",
+                "evidenceEventIds": (evidence.get("cluster_event_ids") or {}).get(cid, [])[:8],
+            }
+        )
+    return out
+
+
+def association_conclusions(evidence: dict) -> list[dict]:
+    """Temporal-association hypotheses between events: does travel speed differ
+    when a given object is being tracked, versus the 'car' baseline? Guards
+    learned from the traffic-light probe: a contrast baseline is mandatory
+    (naive precedence gave the WRONG causal reading), direction is never
+    claimed, and confidence is capped — observational co-occurrence is a
+    hypothesis, not an established cause."""
+    assoc = evidence.get("speed_assoc") or {}
+    base = assoc.get("car") or []
+    if len(base) < 30:
+        return []
+    base_med = statistics.median([a for a, _ in base])
+    if base_med <= 100:
+        return []
+    out = []
+    for label, samples in assoc.items():
+        if label == "car" or len(samples) < 30:
+            continue
+        med = statistics.median([a for a, _ in samples])
+        after = statistics.median([b for _, b in samples])
+        rel = (med - base_med) / base_med
+        if abs(rel) < 0.15:
+            continue
+        slower = rel < 0
+        positive = sum(1 for a, _ in samples if (a < base_med) == slower)
+        frequency, confidence = nal_truth(positive, len(samples), WEAK_HORIZON)
+        confidence = min(confidence, 500)
+        direction = "slower" if slower else "faster"
+        out.append(
+            {
+                "subjectKind": "pattern",
+                "subjectId": f"pattern:{_slug(label)}-speed",
+                "predicate": "associates-with",
+                "object": f"{direction}-travel",
+                "frequencyPerMille": frequency,
+                "confidencePerMille": confidence,
+                "positiveEvidence": positive,
+                "totalEvidence": len(samples),
+                "statement": (
+                    f"hypothesis: '{label}' detections co-occur with {direction} travel "
+                    f"({med / 100:.1f} vs {base_med / 100:.1f} m/s baseline, "
+                    f"then {after / 100:.1f}; n={len(samples)})"
+                ),
+                "evidenceEventIds": [],
+            }
+        )
+    return out
+
+
 REASONERS = {
     "identity-namer-v0": name_conclusions,
     "recurrence-v0": recurrence_conclusions,
@@ -579,6 +752,10 @@ REASONERS = {
     "item-recurrence-v0": item_conclusions,
     "place-recurrence-v0": place_conclusions,
     "place-change-v0": change_conclusions,
+    "activity-classifier-v0": activity_conclusions,
+    "routine-miner-v0": routine_conclusions,
+    "context-binder-v0": context_conclusions,
+    "association-miner-v0": association_conclusions,
 }
 
 

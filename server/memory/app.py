@@ -711,7 +711,103 @@ def gather_reasoning_evidence() -> dict:
         "roster": load_roster(),
     }
     evidence.update(gather_association_evidence())
+    evidence.update(gather_pattern_evidence())
     return evidence
+
+
+def gather_pattern_evidence() -> dict:
+    """Aggregates for the latent-cause reasoners: a per-session observable
+    signature (audio mix, motion, faces, vehicles, start hour) from which the
+    activity classifier infers the latent context, and speed samples around
+    track detections in driving sessions for the temporal-association miner."""
+    import bisect
+    import collections
+
+    def sess_of(p):
+        cp = p.get("channelPath") or []
+        return cp[1] if len(cp) >= 2 and cp[0] == "perception" else None
+
+    sig: dict = {}
+    for event_id in index.by_kind("session-start").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        sid = sess_of(p)
+        if not sid:
+            continue
+        try:
+            hour = int(sid.split("-")[2][:2])
+        except (IndexError, ValueError):
+            hour = 12
+        sig[sid] = {"hour": hour, "startEventId": event_id, "audio": collections.Counter(),
+                    "faces": 0, "vehicles": 0, "fixes": 0, "moving": 0}
+
+    for event_id in index.by_kind("audio-tag-segment").get("eventIds", []):
+        p = _pointer(event_id)
+        s = sess_of(p) if p else None
+        if s in sig:
+            sig[s]["audio"][_payload(p).get("label")] += 1
+    for kind, key in (("face-observation", "faces"), ("vehicle-observation", "vehicles")):
+        for event_id in index.by_kind(kind).get("eventIds", []):
+            p = _pointer(event_id)
+            s = sess_of(p) if p else None
+            if s in sig:
+                sig[s][key] += 1
+
+    speeds = collections.defaultdict(list)
+    for event_id in index.by_kind("location-fix").get("eventIds", []):
+        p = _pointer(event_id)
+        s = sess_of(p) if p else None
+        if s not in sig:
+            continue
+        d = _payload(p)
+        sig[s]["fixes"] += 1
+        v = d.get("speedCmPerS", 0)
+        if v >= 200:
+            sig[s]["moving"] += 1
+        speeds[s].append((d.get("tNanos", 0), v))
+    for s in speeds:
+        speeds[s].sort()
+    stimes = {s: [t for t, _ in arr] for s, arr in speeds.items()}
+
+    def speed_near(s, t, tol=5_000_000_000):
+        arr = speeds.get(s)
+        if not arr:
+            return None
+        i = bisect.bisect_left(stimes[s], t)
+        cand = [arr[j] for j in (i - 1, i) if 0 <= j < len(arr)]
+        best = min(cand, key=lambda x: abs(x[0] - t)) if cand else None
+        return best[1] if best and abs(best[0] - t) <= tol else None
+
+    # Speed at/after each track detection, driving sessions only — the raw
+    # material for "X co-occurs with slowdown" hypotheses with a car baseline.
+    driving = {s for s, g in sig.items() if g["fixes"] and g["moving"] / g["fixes"] >= 0.3}
+    speed_assoc = collections.defaultdict(list)
+    if driving:
+        for event_id in index.by_kind("track-segment").get("eventIds", []):
+            p = _pointer(event_id)
+            s = sess_of(p) if p else None
+            if s not in driving:
+                continue
+            d = _payload(p)
+            t = d.get("tStartNanos", 0)
+            at = speed_near(s, t)
+            after = speed_near(s, t + 12_000_000_000)
+            if at is not None and after is not None:
+                speed_assoc[d.get("label")].append((at, after))
+
+    signatures = {}
+    for s, g in sig.items():
+        au = sum(g["audio"].values()) or 1
+        signatures[s] = {
+            "hour": g["hour"], "startEventId": g["startEventId"],
+            "musicFrac": g["audio"].get("Music", 0) / au,
+            "speechFrac": g["audio"].get("Speech", 0) / au,
+            "driveFrac": (g["moving"] / g["fixes"]) if g["fixes"] else 0.0,
+            "faces": g["faces"], "vehicles": g["vehicles"],
+            "signals": min(20, au + g["fixes"] + g["faces"] + g["vehicles"]),
+        }
+    return {"session_signatures": signatures, "speed_assoc": dict(speed_assoc)}
 
 
 def gather_association_evidence() -> dict:
