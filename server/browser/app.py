@@ -612,9 +612,30 @@ async function openItemObs(slug){
  D.appendChild(el(`<h3>${escape(r.name)} — ${r.events.length} observations</h3>`));
  r.events.forEach(e=>{const d=el(`<div class=link-row><span class="k derived">item</span> <span class=lnk>${escape(e.preview)}</span> <span class=b>${e.session}</span></div>`);d.onclick=()=>openEvent(e.id);D.appendChild(d);});
 }
+let entitiesCache=[], entFilter='';
 async function loadEntities(){
- const es=await j('/api/entities'); const box=$('#sessions'); box.innerHTML='';
- $('#stat').textContent=`· ${es.length} entities`;
+ entitiesCache=await j('/api/entities');
+ renderEntities();
+}
+function renderEntities(){
+ const box=$('#sessions'); box.innerHTML='';
+ const sel=el(`<select style="width:100%;margin-bottom:6px;background:var(--panel);color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:4px 6px;font:inherit">
+   <option value="">all types</option>
+   <option value="face">face</option>
+   <option value="speaker">speaker</option>
+   <option value="vehicle">vehicle</option>
+   <option value="named">named only</option>
+   <option value="recurring">recurring only</option>
+ </select>`);
+ sel.value=entFilter; sel.onchange=()=>{entFilter=sel.value;renderEntities()};
+ box.appendChild(sel);
+ const es=entitiesCache.filter(e=>{
+  if(!entFilter) return true;
+  if(entFilter==='named') return !!e.name;
+  if(entFilter==='recurring') return e.sessionCount>1;
+  return e.modalities.includes(entFilter);
+ });
+ $('#stat').textContent=`· ${es.length} of ${entitiesCache.length} entities`;
  es.forEach(e=>{
   const nm=e.name||('· '+e.pseudonym);
   const mods=e.modalities.map(m=>`<span class=mod>${m}</span>`).join('');
