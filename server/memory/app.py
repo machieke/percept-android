@@ -2074,6 +2074,7 @@ def periodic_worker() -> None:
     the next passes. Reasoning is content-addressed, so unchanged conclusions
     dedup and this is free when nothing changed."""
     last_count = -1
+    last_voiceprints = -1
     time.sleep(60)  # startup grace: let the index finish replaying
     while True:
         try:
@@ -2084,6 +2085,18 @@ def periodic_worker() -> None:
                 # Idempotent: only undescribed passes of recurring places cost a
                 # VLM call, so re-queuing every tick is cheap when nothing is new.
                 place_queue.put(1)
+            # Re-diarize before reasoning when new voiceprints landed, so the
+            # sweep below folds the refreshed clusters in the same tick.
+            # Unchanged assignments dedup by content address, so a re-run on
+            # stable data only costs the clustering itself.
+            try:
+                vp_count = sum(1 for _ in (DATA_ROOT / "voiceprints.jsonl").open())
+            except FileNotFoundError:
+                vp_count = 0
+            if vp_count != last_voiceprints and vp_count > 0:
+                out = rediarize()
+                print(f"periodic rediarize: {out}", flush=True)
+                last_voiceprints = vp_count
             count = sum(len(index.by_kind(k).get("eventIds", []))
                         for k in ("face-observation", "speaker-observation", "vehicle-observation",
                                   "identity-resolution", "speaker-attribution", "asr-segment"))
