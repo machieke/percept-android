@@ -1760,6 +1760,7 @@ def resolve_places_endpoint(authorization: str | None = Header(None)) -> dict:
 
 UTT_LINK_THRESHOLD = float(os.environ.get("UTT_LINK_THRESHOLD", "0.50"))
 XSESS_LINK_THRESHOLD = float(os.environ.get("XSESS_LINK_THRESHOLD", "0.60"))
+STABLE_ID_THRESHOLD = float(os.environ.get("STABLE_ID_THRESHOLD", "0.70"))
 
 
 def _agglo(E, threshold: float) -> list:
@@ -1830,12 +1831,36 @@ def rediarize() -> dict:
     C = np.stack([c for _, _, c in session_clusters])
     global_groups = _agglo(C, XSESS_LINK_THRESHOLD)
 
+    # Stable ids: match each new cluster to the previous registry's centroids
+    # and reuse the old id when they clearly agree — so "speaker-4" keeps
+    # meaning the same voice across re-clusterings and conclusions accumulate
+    # on stable subjects instead of fragmenting across renumbered eras. Only
+    # genuinely new voices mint fresh (never-recycled) ids.
+    prev = {}
+    for ocid, oc in identities.data.get("speaker", {}).items():
+        ov = np.asarray(oc["centroid"], dtype=np.float32)
+        n = np.linalg.norm(ov)
+        if n > 0:
+            prev[ocid] = ov / n
+
     clusters = {}
     assignment = {}                             # asrEventId -> (clusterId, simPermille)
-    for gi, members in enumerate(sorted(global_groups, key=lambda g: -sum(len(session_clusters[m][1]) for m in g))):
-        cid = f"speaker-{gi + 1}"
+    taken: set = set()
+    for members in sorted(global_groups, key=lambda g: -sum(len(session_clusters[m][1]) for m in g)):
         cent = C[members].mean(0)
         cent = cent / (np.linalg.norm(cent) + 1e-9)
+        best_id, best_sim = None, 0.0
+        for ocid, ov in prev.items():
+            if ocid in taken:
+                continue
+            sim = float(cent @ ov)
+            if sim > best_sim:
+                best_id, best_sim = ocid, sim
+        if best_id is not None and best_sim >= STABLE_ID_THRESHOLD:
+            cid = best_id
+            taken.add(best_id)
+        else:
+            cid = identities.mint_id("speaker")
         count = 0
         for m in members:
             sid, asr_ids, _ = session_clusters[m]

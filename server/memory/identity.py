@@ -35,6 +35,29 @@ class IdentityRegistry:
             self.data = json.loads(path.read_text())
             for kind in ("speaker", "face", "vehicle"):
                 self.data.setdefault(kind, {})
+        # Monotonic per-kind id counters so cluster ids are NEVER recycled —
+        # len()+1 minting would reuse historical ids after a re-clustering
+        # shrinks the registry, silently re-binding old conclusions to new
+        # identities. Initialize from the highest suffix ever seen.
+        self.data.setdefault("_counters", {})
+        for kind in ("speaker", "face", "vehicle"):
+            highest = max(
+                (int(cid.rsplit("-", 1)[-1]) for cid in self.data[kind]
+                 if cid.rsplit("-", 1)[-1].isdigit()),
+                default=0,
+            )
+            self.data["_counters"][kind] = max(self.data["_counters"].get(kind, 0), highest)
+
+    def _mint_locked(self, kind: str) -> str:
+        self.data["_counters"][kind] = self.data["_counters"].get(kind, 0) + 1
+        return f"{kind}-{self.data['_counters'][kind]}"
+
+    def mint_id(self, kind: str) -> str:
+        """A fresh, never-before-used cluster id."""
+        with self.lock:
+            cid = self._mint_locked(kind)
+            self._save()
+            return cid
 
     def _threshold(self, kind: str) -> float:
         return _THRESHOLDS.get(kind, FACE_SIM_THRESHOLD)
@@ -61,7 +84,7 @@ class IdentityRegistry:
                 cluster["count"] = count + 1
                 self._save()
                 return best_id, int(best_sim * 1000)
-            new_id = f"{kind}-{len(clusters) + 1}"
+            new_id = self._mint_locked(kind)
             clusters[new_id] = {"centroid": vector.tolist(), "count": 1}
             self._save()
             return new_id, 1000
@@ -72,6 +95,8 @@ class IdentityRegistry:
         only when at least as confident."""
         with self.lock:
             for kind in self.data:
+                if kind.startswith("_"):
+                    continue
                 cluster = self.data[kind].get(cluster_id)
                 if cluster is None:
                     continue
@@ -115,10 +140,18 @@ class IdentityRegistry:
                     c["labelMethod"] = "human"
                     c["labelConfidence"] = best.get("labelConfidence", 1000)
             self.data[kind] = clusters
+            highest = max(
+                (int(cid.rsplit("-", 1)[-1]) for cid in clusters
+                 if cid.rsplit("-", 1)[-1].isdigit()),
+                default=0,
+            )
+            self.data["_counters"][kind] = max(self.data["_counters"].get(kind, 0), highest)
             self._save()
 
     def label_of(self, cluster_id: str) -> str | None:
         for kind in self.data:
+            if kind.startswith("_"):
+                continue
             cluster = self.data[kind].get(cluster_id)
             if cluster:
                 return cluster.get("label")
@@ -135,6 +168,7 @@ class IdentityRegistry:
                 for cluster_id, c in clusters.items()
             }
             for kind, clusters in self.data.items()
+            if not kind.startswith("_")
         }
 
     def _save(self) -> None:
