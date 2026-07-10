@@ -185,6 +185,7 @@ def transcribe_chunk(pointer: dict, force: bool = False) -> dict | None:
 
 
 identities = IdentityRegistry(DATA_ROOT / "identities.json")
+voiceprint_lock = threading.Lock()
 
 
 def _pointer(event_id: str) -> dict | None:
@@ -254,6 +255,19 @@ def identify_chunk(chunk_event_id: str, force: bool = False) -> None:
             print(f"speaker embed failed for {segment_id}: {exc}", flush=True)
             continue
         cluster_id, similarity = identities.assign("speaker", result["embedding"])
+        # Persist the utterance voiceprint (embeddings live on the volume, never
+        # in the trace) so /rediarize can re-cluster globally: within-session
+        # grouping + cross-session linking of averaged voiceprints beats the
+        # greedy per-utterance online assignment that built mega-clusters.
+        with voiceprint_lock:
+            with (DATA_ROOT / "voiceprints.jsonl").open("a") as vp:
+                vp.write(json.dumps({
+                    "asrEventId": segment_id,
+                    "sessionId": seg_payload["sessionId"],
+                    "tStartNanos": seg_payload["tStartNanos"],
+                    "modelRunId": result.get("modelRunId", "unknown"),
+                    "embedding": result["embedding"],
+                }) + "\n")
         payload = {
             "kind": "raw-payload",
             "schema": "perception-speaker-v0.1",
@@ -671,7 +685,7 @@ def gather_reasoning_evidence() -> dict:
         pl = _payload(p)
         resolutions[pl["clusterId"]].append({"eventId": event_id, "name": pl.get("resolvedName", "")})
 
-    for kind in ("face-observation", "speaker-observation", "vehicle-observation"):
+    for kind in ("face-observation", "vehicle-observation"):
         for event_id in index.by_kind(kind).get("eventIds", []):
             p = _pointer(event_id)
             if not p:
@@ -680,12 +694,25 @@ def gather_reasoning_evidence() -> dict:
             cid = pl["clusterId"]
             cluster_sessions[cid].add(pl["sessionId"])
             cluster_event_ids[cid].append(event_id)
-            if kind == "speaker-observation" and p.get("parentEventIds"):
-                asr = _pointer(p["parentEventIds"][0])
-                if asr and asr["valueKind"] == "asr-segment":
-                    speaker_langs[cid].append(_payload(asr).get("langHint", "auto"))
-                    speaker_utterance_ids[cid].append(p["parentEventIds"][0])
-                    asr_cluster[p["parentEventIds"][0]] = cid
+
+    # Speaker observations are revised by /rediarize (new events, old preserved
+    # as history) — per utterance, only the LATEST observation is evidence.
+    spk_latest: dict = {}
+    for event_id in index.by_kind("speaker-observation").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        parent = (p.get("parentEventIds") or [event_id])[0]
+        spk_latest[parent] = (event_id, _payload(p))
+    for parent, (event_id, pl) in spk_latest.items():
+        cid = pl["clusterId"]
+        cluster_sessions[cid].add(pl["sessionId"])
+        cluster_event_ids[cid].append(event_id)
+        asr = _pointer(parent)
+        if asr and asr["valueKind"] == "asr-segment":
+            speaker_langs[cid].append(_payload(asr).get("langHint", "auto"))
+            speaker_utterance_ids[cid].append(parent)
+            asr_cluster[parent] = cid
 
     # Screen-glow attributions name the utterance they parent; join to the
     # audio speaker cluster through that shared asr-segment.
@@ -1727,6 +1754,146 @@ def resolve_places_endpoint(authorization: str | None = Header(None)) -> dict:
     check_auth(authorization)
     place_queue.put(1)
     return {"ok": True, "queued": True}
+
+
+# --- Global speaker re-diarization over stored voiceprints --------------------
+
+UTT_LINK_THRESHOLD = float(os.environ.get("UTT_LINK_THRESHOLD", "0.50"))
+XSESS_LINK_THRESHOLD = float(os.environ.get("XSESS_LINK_THRESHOLD", "0.60"))
+
+
+def _agglo(E, threshold: float) -> list:
+    """Centroid-linkage agglomerative clustering on unit vectors; returns lists
+    of row indices. Merges the closest pair until nothing exceeds threshold."""
+    import numpy as np
+
+    clusters = [[i] for i in range(len(E))]
+    cents = [E[i].astype("float64").copy() for i in range(len(E))]
+    while len(clusters) > 1:
+        C = np.stack([c / (np.linalg.norm(c) + 1e-9) for c in cents])
+        S = C @ C.T
+        np.fill_diagonal(S, -1.0)
+        i, j = np.unravel_index(np.argmax(S), S.shape)
+        if S[i, j] < threshold:
+            break
+        clusters[i] += clusters[j]
+        cents[i] = cents[i] + cents[j]
+        del clusters[j], cents[j]
+    return clusters
+
+
+def rediarize() -> dict:
+    """Two-stage global speaker clustering over the stored voiceprints: within
+    each session, agglomerate utterances (diarization); then link the session
+    clusters' AVERAGED voiceprints across sessions — averaging n utterances
+    cuts embedding noise ~sqrt(n), which is what per-utterance greedy online
+    assignment (the mega-cluster builder) never had. Rebuilds the speaker
+    registry and re-emits speaker-observations; evidence gathering takes the
+    latest observation per utterance, so revisions supersede without erasing."""
+    import collections
+
+    import numpy as np
+
+    path = DATA_ROOT / "voiceprints.jsonl"
+    if not path.exists():
+        return {"ok": False, "reason": "no voiceprints stored yet"}
+    rows: dict = {}
+    for line in path.open():
+        line = line.strip()
+        if line:
+            r = json.loads(line)
+            rows[r["asrEventId"]] = r          # last write per utterance wins
+    if not rows:
+        return {"ok": False, "reason": "no voiceprints stored yet"}
+    current_run = list(rows.values())[-1]["modelRunId"]
+    rows = {k: r for k, r in rows.items() if r["modelRunId"] == current_run}
+
+    by_session = collections.defaultdict(list)
+    for r in rows.values():
+        v = np.asarray(r["embedding"], dtype=np.float32)
+        n = np.linalg.norm(v)
+        if n > 0:
+            by_session[r["sessionId"]].append((r["asrEventId"], v / n))
+
+    # Stage 1: within-session diarization.
+    session_clusters = []                       # (sessionId, [asrEventIds], centroid)
+    for sid, utts in by_session.items():
+        E = np.stack([v for _, v in utts])
+        for members in _agglo(E, UTT_LINK_THRESHOLD):
+            cent = E[members].mean(0)
+            cent = cent / (np.linalg.norm(cent) + 1e-9)
+            session_clusters.append((sid, [utts[i][0] for i in members], cent))
+    if not session_clusters:
+        return {"ok": False, "reason": "no session clusters"}
+
+    # Stage 2: cross-session linking of averaged session voiceprints.
+    C = np.stack([c for _, _, c in session_clusters])
+    global_groups = _agglo(C, XSESS_LINK_THRESHOLD)
+
+    clusters = {}
+    assignment = {}                             # asrEventId -> (clusterId, simPermille)
+    for gi, members in enumerate(sorted(global_groups, key=lambda g: -sum(len(session_clusters[m][1]) for m in g))):
+        cid = f"speaker-{gi + 1}"
+        cent = C[members].mean(0)
+        cent = cent / (np.linalg.norm(cent) + 1e-9)
+        count = 0
+        for m in members:
+            sid, asr_ids, _ = session_clusters[m]
+            for aid in asr_ids:
+                v = np.asarray(rows[aid]["embedding"], dtype=np.float32)
+                v = v / (np.linalg.norm(v) + 1e-9)
+                assignment[aid] = (cid, int(max(0.0, float(v @ cent)) * 1000))
+                count += 1
+        clusters[cid] = {"centroid": cent.tolist(), "count": count}
+    identities.replace_kind("speaker", clusters)
+
+    emitted = 0
+    for aid, (cid, sim) in assignment.items():
+        asr = _pointer(aid)
+        if not asr:
+            continue
+        apl = _payload(asr)
+        payload = {
+            "kind": "raw-payload",
+            "schema": "perception-speaker-v0.1",
+            "sessionId": apl["sessionId"],
+            "clusterId": cid,
+            "similarityPermille": sim,
+            "tStartNanos": apl["tStartNanos"],
+            "tEndNanos": apl["tEndNanos"],
+            "observedAt": apl["observedAt"],
+        }
+        label = identities.label_of(cid)
+        if label:
+            payload["label"] = label
+        with ingest_lock:
+            if ingest_or_skip_duplicate(
+                raw_payload=payload,
+                observed_at=apl["observedAt"],
+                actor_path=["server", "percept-memory", "speaker-id"],
+                channel_path=[asr["channelPath"][0], asr["channelPath"][1], "identity"],
+                value_kind="speaker-observation",
+                preview=label or cid,
+                provenance={
+                    "source": "percept-memory-server",
+                    "observedBy": "percept-memory",
+                    "ingestionPipeline": "event-trace-v0",
+                    "extractionRunId": f"rediarize-v1+{current_run}",
+                },
+                parent_event_ids=[aid],
+                root_event_id=asr["rootEventId"],
+                input_event_ids=[aid],
+            ):
+                emitted += 1
+    return {"ok": True, "modelRun": current_run, "utterances": len(assignment),
+            "sessionClusters": len(session_clusters), "speakers": len(clusters), "newObservations": emitted}
+
+
+@app.post("/rediarize")
+def rediarize_endpoint(authorization: str | None = Header(None)) -> dict:
+    """Re-cluster all stored voiceprints globally and rebuild the speaker registry."""
+    check_auth(authorization)
+    return rediarize()
 
 
 # --- Open-vocabulary item identification (what the COCO detector can't name) ---

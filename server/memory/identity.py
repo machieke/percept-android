@@ -91,6 +91,32 @@ class IdentityRegistry:
                 return True
         return False
 
+    def replace_kind(self, kind: str, clusters: dict) -> None:
+        """Wholesale rebuild of one kind's clusters after a global re-clustering
+        (e.g. /rediarize). Human labels are re-attached by centroid similarity
+        where a clear match exists; model labels are dropped."""
+        with self.lock:
+            old = self.data.get(kind, {})
+            for cid, c in clusters.items():
+                if c.get("label"):
+                    continue
+                best, best_sim = None, 0.0
+                cv = np.asarray(c["centroid"], dtype=np.float32)
+                cv = cv / (np.linalg.norm(cv) or 1.0)
+                for o in old.values():
+                    if o.get("labelMethod") != "human":
+                        continue
+                    ov = np.asarray(o["centroid"], dtype=np.float32)
+                    sim = float(np.dot(cv, ov / (np.linalg.norm(ov) or 1.0)))
+                    if sim > best_sim:
+                        best, best_sim = o, sim
+                if best is not None and best_sim >= 0.7:
+                    c["label"] = best["label"]
+                    c["labelMethod"] = "human"
+                    c["labelConfidence"] = best.get("labelConfidence", 1000)
+            self.data[kind] = clusters
+            self._save()
+
     def label_of(self, cluster_id: str) -> str | None:
         for kind in self.data:
             cluster = self.data[kind].get(cluster_id)

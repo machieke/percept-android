@@ -3,9 +3,9 @@
 set -eu
 
 MODELS_ROOT="${MODELS_ROOT:-/models}"
-SPEAKER_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM%2B%2B.onnx"
-SPEAKER_SHA256="c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef"
-SPEAKER_FILE="${MODELS_ROOT}/wespeaker_en_voxceleb_CAM++.onnx"
+SPEAKER_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_large.onnx"
+SPEAKER_SHA256="d51abcf31717ef28162f26acb9d44dd4127c3d44c9b8624f699f3425daca8e77"
+SPEAKER_FILE="${MODELS_ROOT}/nemo_en_titanet_large.onnx"
 
 mkdir -p "${MODELS_ROOT}"
 if [ ! -f "${SPEAKER_FILE}" ]; then

@@ -14,10 +14,15 @@ import numpy as np
 import sherpa_onnx
 from fastapi import FastAPI, HTTPException, Request
 
+# titanet-large won an A/B on glow-labeled far-field meeting audio: 6x the
+# same/diff cosine separation of wespeaker CAM++ (0.177 vs 0.030) and 62% vs
+# 40% leave-one-out speaker accuracy.
 SPEAKER_MODEL = os.environ.get(
-    "SPEAKER_MODEL", "/models/wespeaker_en_voxceleb_CAM++.onnx"
+    "SPEAKER_MODEL", "/models/nemo_en_titanet_large.onnx"
 )
-SPEAKER_RUN_ID = "wespeaker-cam++-voxceleb@sherpa-onnx-1.13.3"
+SPEAKER_RUN_ID = (
+    os.path.splitext(os.path.basename(SPEAKER_MODEL))[0] + "@sherpa-onnx-1.13.3"
+)
 FACE_RUN_ID = "buffalo_sc@insightface-0.7"
 
 speaker_extractor = sherpa_onnx.SpeakerEmbeddingExtractor(
