@@ -87,8 +87,10 @@ ITEM_PROMPT = (
 ANIMAL_VERIFY_PROMPT = (
     "Does this image clearly show a real, live animal? If yes, reply with ONLY "
     "the animal type in one or two words (e.g. cat, dog, bird, cow, horse). If "
-    "no animal is clearly visible — trees, people, vehicles, objects, or "
-    "anything too blurry do NOT count — reply NONE."
+    "no animal is clearly visible, reply NONE. Trees, people, vehicles, "
+    "shadows, and blurry shapes do NOT count. A dark round blob, camera mount, "
+    "suction cup, or anything attached to the windshield is NOT an animal — "
+    "only confirm when you can clearly see the animal's body, head or legs."
 )
 
 
@@ -108,8 +110,9 @@ VEHICLE_VERIFY_PROMPT = (
     "Does this image clearly show a road vehicle (car, van, truck, bus, "
     "motorcycle)? If yes, reply with ONLY its colour and type in a few words "
     "(e.g. 'silver SUV', 'white delivery van', 'red hatchback'). If no vehicle "
-    "is clearly visible — buildings, vegetation, road surface, or anything too "
-    "blurry do NOT count — reply NONE."
+    "is clearly visible, reply NONE. Buildings, vegetation, road surface, "
+    "dark blobs, camera mounts or windshield fixtures do NOT count — only "
+    "confirm when you can clearly see the vehicle's body."
 )
 
 

@@ -1458,6 +1458,9 @@ def identify_vehicles(session_id: str, min_box_px: int = 56, verify_cap: int = 8
             per_track.setdefault(track_id, {"label": label, "tp": tp, "crops": []})
             per_track[track_id]["crops"].append((crop.shape[0] * crop.shape[1], t_frame, [x1, y1, x2, y2], crop))
 
+    fixtures = _camera_fixture_tracks(per_track, session_id)
+    per_track = {tid: v for tid, v in per_track.items() if tid not in fixtures}
+
     ranked = sorted(per_track.items(), key=lambda kv: -max(c[0] for c in kv[1]["crops"]))
     emitted = 0
     verified_tracks = 0
@@ -1542,6 +1545,47 @@ def identify_vehicles_endpoint(sessionId: str, authorization: str | None = Heade
 ANIMAL_LABELS = {"bird", "cat", "dog", "horse", "sheep", "cow", "bear", "elephant", "zebra", "giraffe"}
 
 
+def _camera_fixture_tracks(per_track: dict, session_id: str) -> set:
+    """Tracks attached to the camera rather than the world — the dashcam
+    suction mount is a dark blob at a fixed screen position that COCO tracks as
+    an 'animal' in every driving frame, out-sizing real candidates and fooling
+    even the VLM (a silhouette against woods reads as 'deer'). In a MOVING
+    session nothing real stays at the same screen spot: drop candidates whose
+    box barely moves over a long track, or whose position keeps spawning
+    tracks. Stationary sessions are left alone (a sleeping cat is not a
+    fixture)."""
+    moving = fixes = 0
+    for event_id in index.by_kind("location-fix").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        d = _payload(p)
+        if d.get("sessionId") != session_id:
+            continue
+        fixes += 1
+        if d.get("speedCmPerS", 0) >= 200:
+            moving += 1
+    if not fixes or moving / fixes < 0.2:
+        return set()
+
+    stats = {}
+    for tid, v in per_track.items():
+        tp = _payload(v["tp"])
+        bf, bl = tp["boxFirst"], tp["boxLast"]
+        cx = ((bf[0] + bf[2]) / 2 + (bl[0] + bl[2]) / 2) / 2
+        cy = ((bf[1] + bf[3]) / 2 + (bl[1] + bl[3]) / 2) / 2
+        dur = (tp["tEndNanos"] - tp["tStartNanos"]) / 1e9
+        move = abs((bl[0] + bl[2]) / 2 - (bf[0] + bf[2]) / 2) + abs((bl[1] + bl[3]) / 2 - (bf[1] + bf[3]) / 2)
+        stats[tid] = (cx, cy, dur, move)
+    drop = set()
+    for tid, (cx, cy, dur, move) in stats.items():
+        neighbours = sum(1 for x2, y2, _, _ in stats.values() if abs(x2 - cx) < 55 and abs(y2 - cy) < 55)
+        if neighbours >= 3 or (dur > 20 and move < 50):
+            drop.add(tid)
+    return drop
+
+
+
 def identify_animals(session_id: str, min_box_px: int = 40, verify_cap: int = 8) -> dict:
     """Cluster tracked animals by appearance, like vehicles — but VERIFIED: the
     COCO detector confabulates freely outside its distribution (trees ->
@@ -1596,6 +1640,9 @@ def identify_animals(session_id: str, min_box_px: int = 40, verify_cap: int = 8)
             per_track[track_id]["crops"].append((crop.shape[0] * crop.shape[1], t_frame, [x1, y1, x2, y2], crop))
 
     # Verify the largest tracks first, bounded per session.
+    fixtures = _camera_fixture_tracks(per_track, session_id)
+    per_track = {tid: v for tid, v in per_track.items() if tid not in fixtures}
+
     ranked = sorted(per_track.items(), key=lambda kv: -max(c[0] for c in kv[1]["crops"]))
     emitted = 0
     verified_tracks = 0
