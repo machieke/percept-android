@@ -104,6 +104,27 @@ def verify_animal(jpeg: bytes) -> str | None:
     return word
 
 
+VEHICLE_VERIFY_PROMPT = (
+    "Does this image clearly show a road vehicle (car, van, truck, bus, "
+    "motorcycle)? If yes, reply with ONLY its colour and type in a few words "
+    "(e.g. 'silver SUV', 'white delivery van', 'red hatchback'). If no vehicle "
+    "is clearly visible — buildings, vegetation, road surface, or anything too "
+    "blurry do NOT count — reply NONE."
+)
+
+
+def verify_vehicle(jpeg: bytes) -> str | None:
+    """Confirm a detector 'vehicle' track actually shows a vehicle and return
+    the VLM's colour+type description, or None. Same rationale as animals: the
+    COCO detector confabulates outside its distribution and its confidence
+    score does not separate real vehicles from junk."""
+    raw = _generate(VLM_MODEL, VEHICLE_VERIFY_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
+    desc = raw.strip().strip('".').splitlines()[0].strip().lower() if raw else ""
+    if not desc or "none" in desc.split() or len(desc) > 40 or not any(c.isalpha() for c in desc):
+        return None
+    return desc
+
+
 OBJECT_PROMPT = (
     "Name the single main object shown in this cropped image in 1-4 words. Be "
     "specific and include a brand or type if legible (e.g. 'potting soil bag', "

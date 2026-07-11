@@ -1405,14 +1405,16 @@ def _scale_det_box(box, W: int, H: int) -> tuple:
     return int(box[0] * sx), int(box[1] * sy), int(box[2] * sx), int(box[3] * sy)
 
 
-def identify_vehicles(session_id: str, min_box_px: int = 56) -> dict:
+def identify_vehicles(session_id: str, min_box_px: int = 56, verify_cap: int = 8) -> dict:
     """Cluster vehicles by appearance so a car can be recognized across
-    appearances and sessions. The on-device tracker already gives each vehicle a
-    trackId + a box over its lifetime; where a stored keyframe falls inside that
-    lifetime we interpolate the box, crop the vehicle out of the keyframe pixels,
-    embed its appearance (vehicle.appearance_embedding), and assign it to a
-    persistent cluster — emitting a vehicle-observation parented to the track.
-    The recurrence reasoner then surfaces vehicles that recur across sessions."""
+    appearances and sessions — VERIFIED, like animals: candidates are grouped
+    per trackId, the largest crop of each track is re-checked by the VLM
+    (colour + type, e.g. 'silver SUV', or NONE), bounded to the biggest
+    verify_cap tracks per session. Only confirmed tracks register
+    vehicle-observations, carrying the VLM description as vehicleType
+    (cocoLabel kept for provenance); junk tracks — the previous pass produced
+    1473 clusters of mostly unverifiable blobs — are dropped. The recurrence
+    reasoner then surfaces vehicles that recur across sessions."""
     import cv2
     import numpy as np
 
@@ -1436,8 +1438,7 @@ def identify_vehicles(session_id: str, min_box_px: int = 56) -> dict:
         tracks.append((pl["tStartNanos"], pl["tEndNanos"], pl["boxFirst"], pl["boxLast"],
                        pl["label"], pl.get("trackId"), p))
 
-    emitted = 0
-    clusters_seen: "set[str]" = set()
+    per_track: dict = {}
     for t_frame, artifact_id in frames:
         overlapping = [t for t in tracks if t[0] <= t_frame <= t[1]]
         if not overlapping:
@@ -1452,23 +1453,48 @@ def identify_vehicles(session_id: str, min_box_px: int = 56) -> dict:
                 continue
             x1, y1, x2, y2 = _scale_det_box(box, W, H)                  # -> keyframe pixels
             crop = img[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+            if not crop.size:
+                continue
+            per_track.setdefault(track_id, {"label": label, "tp": tp, "crops": []})
+            per_track[track_id]["crops"].append((crop.shape[0] * crop.shape[1], t_frame, [x1, y1, x2, y2], crop))
+
+    ranked = sorted(per_track.items(), key=lambda kv: -max(c[0] for c in kv[1]["crops"]))
+    emitted = 0
+    verified_tracks = 0
+    clusters_seen: "set[str]" = set()
+    for track_id, cand in ranked[:verify_cap]:
+        cand["crops"].sort(key=lambda c: -c[0])
+        ok, buf = cv2.imencode(".jpg", cand["crops"][0][3], [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            continue
+        try:
+            desc = enrichment.verify_vehicle(buf.tobytes())
+        except Exception as exc:  # noqa: BLE001
+            print(f"vehicle verify failed for track {track_id}: {exc}", flush=True)
+            continue
+        if not desc:
+            continue
+        verified_tracks += 1
+        tp = cand["tp"]
+        tpl = _payload(tp)
+        for _, t_frame, box, crop in cand["crops"]:
             embedding = veh.appearance_embedding(crop)
             if not embedding:
                 continue
             cluster_id, similarity = identities.assign("vehicle", embedding)
             clusters_seen.add(cluster_id)
-            tpl = _payload(tp)
             with ingest_lock:
                 if ingest_or_skip_duplicate(
                     raw_payload={
                         "kind": "raw-payload",
-                        "schema": "perception-vehicle-v0.1",
+                        "schema": "perception-vehicle-v0.2",
                         "sessionId": session_id,
                         "clusterId": cluster_id,
                         "similarityPermille": similarity,
-                        "vehicleType": label,
+                        "vehicleType": desc,
+                        "cocoLabel": cand["label"],
                         "trackId": track_id,
-                        "box": [x1, y1, x2, y2],
+                        "box": box,
                         "tNanos": t_frame,
                         "observedAt": tpl.get("observedAt", "2026-01-01T00:00:00Z"),
                     },
@@ -1476,20 +1502,20 @@ def identify_vehicles(session_id: str, min_box_px: int = 56) -> dict:
                     actor_path=["server", "percept-memory", "vehicle-id"],
                     channel_path=[tp["channelPath"][0], tp["channelPath"][1], "identity"],
                     value_kind="vehicle-observation",
-                    preview=f"{cluster_id} ({label})",
+                    preview=f"{cluster_id} ({desc})",
                     provenance={
                         "source": "percept-memory-server",
                         "observedBy": "percept-memory",
                         "ingestionPipeline": "event-trace-v0",
-                        "extractionRunId": "vehicle-appearance-v0@percept-memory",
+                        "extractionRunId": f"vehicle-verified-v1+{enrichment.VLM_MODEL}",
                     },
                     parent_event_ids=[tp["eventId"]],
                     root_event_id=tp["rootEventId"],
                     input_event_ids=[tp["eventId"]],
                 ):
                     emitted += 1
-
-    return {"ok": True, "observations": emitted, "clusters": len(clusters_seen)}
+    return {"ok": True, "candidateTracks": len(per_track), "verifiedTracks": verified_tracks,
+            "observations": emitted, "clusters": len(clusters_seen)}
 
 
 vehicle_queue: "queue.Queue[str]" = queue.Queue()
