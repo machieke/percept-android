@@ -2072,10 +2072,13 @@ def enqueue_session_derivations() -> dict:
             queued[kind].append(sid)
             marks.append(key)
 
-    # Name-read any session that is clearly a meeting: tile-configured, or rich
-    # in faces (>= 20 observations — screens/gatherings, not a passerby). The
-    # pass itself is bounded (sharpest ~5 reads per cluster), so this cannot
-    # saturate ollama the way per-frame reading would.
+    # Name-read any session where faces were genuinely captured (>= 5
+    # face-observations — a 4-person call crosses this within seconds, while a
+    # single passerby face in a dashcam does not). Every session read adds
+    # evidence to its recurring clusters' has-name conclusions, which is how
+    # naming confidence grows cross-session over time. The pass itself is
+    # bounded (sharpest ~5 reads per cluster), so this cannot saturate ollama
+    # the way per-frame reading would.
     face_counts: dict = {}
     for event_id in index.by_kind("face-observation").get("eventIds", []):
         p = _pointer(event_id)
@@ -2083,7 +2086,7 @@ def enqueue_session_derivations() -> dict:
             cp = p.get("channelPath") or []
             if len(cp) >= 2:
                 face_counts[cp[1]] = face_counts.get(cp[1], 0) + 1
-    face_rich = {sid for sid, n in face_counts.items() if n >= 20}
+    face_rich = {sid for sid, n in face_counts.items() if n >= 5}
     enqueue("resolve", resolve_queue, ((tiled & present["face-observation"]) | face_rich) - present["identity-resolution"])
     enqueue("attribute", attribute_queue, tiled - present["speaker-attribution"])
     enqueue("vehicle", vehicle_queue, veh_sessions - present["vehicle-observation"])
