@@ -28,7 +28,7 @@ EVIDENTIAL_HORIZON = 1  # NAL k: one more counterexample would halve certainty g
 # Their recurrence needs far more evidence before it is believed, and an entity
 # built only from them stays low-confidence unless a reliable modality (a face)
 # corroborates it.
-WEAK_MODALITIES = {"speaker", "vehicle"}
+WEAK_MODALITIES = {"speaker", "vehicle", "animal"}
 WEAK_HORIZON = 6
 
 # Below this bigram-cosine, a read is a total misread (wrong first name) and is

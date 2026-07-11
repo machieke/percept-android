@@ -75,7 +75,7 @@ def load() -> None:
             for parent in p.get("parentEventIds", []):
                 children.setdefault(parent, []).append(p["eventId"])
             vk = p.get("valueKind")
-            if vk in ("face-observation", "speaker-observation", "vehicle-observation"):
+            if vk in ("face-observation", "speaker-observation", "vehicle-observation", "animal-observation"):
                 pl = json.loads(_payload_cached(_digest(p["payloadCid"])))
                 cid = pl.get("clusterId")
                 if cid:
@@ -561,7 +561,7 @@ async function openEvent(id){
  addLinks(g,'parents ▲',e.parents); addLinks(g,'children ▼',e.children);
  D.appendChild(g);
  // image fragment for observations (the box cropped from its keyframe, or the whole scene for items)
- if(['face-observation','vehicle-observation','item-observation','object-observation'].includes(e.kind)){
+ if(['face-observation','vehicle-observation','animal-observation','item-observation','object-observation'].includes(e.kind)){
   const f=el('<div></div>'); f.appendChild(el('<h3>image fragment</h3>'));
   const img=el(`<img class=kf src="/api/crop/${encodeURIComponent(e.id)}">`);
   img.onerror=()=>img.replaceWith(el('<div class=mut>no image fragment</div>'));
@@ -637,6 +637,7 @@ function renderEntities(){
    <option value="face">face</option>
    <option value="speaker">speaker</option>
    <option value="vehicle">vehicle</option>
+   <option value="animal">animal</option>
    <option value="named">named only</option>
    <option value="recurring">recurring only</option>
  </select>`);

@@ -18,11 +18,13 @@ import numpy as np
 SPEAKER_SIM_THRESHOLD = float(os.environ.get("SPEAKER_SIM_THRESHOLD", "0.50"))
 FACE_SIM_THRESHOLD = float(os.environ.get("FACE_SIM_THRESHOLD", "0.45"))
 VEHICLE_SIM_THRESHOLD = float(os.environ.get("VEHICLE_SIM_THRESHOLD", "0.985"))
+ANIMAL_SIM_THRESHOLD = float(os.environ.get("ANIMAL_SIM_THRESHOLD", "0.90"))
 
 _THRESHOLDS = {
     "speaker": SPEAKER_SIM_THRESHOLD,
     "face": FACE_SIM_THRESHOLD,
     "vehicle": VEHICLE_SIM_THRESHOLD,
+    "animal": ANIMAL_SIM_THRESHOLD,
 }
 
 
@@ -30,17 +32,17 @@ class IdentityRegistry:
     def __init__(self, path: Path):
         self.path = path
         self.lock = threading.Lock()
-        self.data: dict = {"speaker": {}, "face": {}, "vehicle": {}}
+        self.data: dict = {"speaker": {}, "face": {}, "vehicle": {}, "animal": {}}
         if path.exists():
             self.data = json.loads(path.read_text())
-            for kind in ("speaker", "face", "vehicle"):
+            for kind in ("speaker", "face", "vehicle", "animal"):
                 self.data.setdefault(kind, {})
         # Monotonic per-kind id counters so cluster ids are NEVER recycled —
         # len()+1 minting would reuse historical ids after a re-clustering
         # shrinks the registry, silently re-binding old conclusions to new
         # identities. Initialize from the highest suffix ever seen.
         self.data.setdefault("_counters", {})
-        for kind in ("speaker", "face", "vehicle"):
+        for kind in ("speaker", "face", "vehicle", "animal"):
             highest = max(
                 (int(cid.rsplit("-", 1)[-1]) for cid in self.data[kind]
                  if cid.rsplit("-", 1)[-1].isdigit()),

@@ -730,7 +730,7 @@ def gather_reasoning_evidence() -> dict:
         pl = _payload(p)
         resolutions[pl["clusterId"]].append({"eventId": event_id, "name": pl.get("resolvedName", "")})
 
-    for kind in ("face-observation", "vehicle-observation"):
+    for kind in ("face-observation", "vehicle-observation", "animal-observation"):
         for event_id in index.by_kind(kind).get("eventIds", []):
             p = _pointer(event_id)
             if not p:
@@ -944,7 +944,7 @@ def gather_association_evidence() -> dict:
         fx = nearest_fix(pl["sessionId"], t)
         if fx:
             cluster_latlon[pl["clusterId"]].append(fx)
-    for kind, tfield in (("speaker-observation", "tStartNanos"), ("vehicle-observation", "tNanos")):
+    for kind, tfield in (("speaker-observation", "tStartNanos"), ("vehicle-observation", "tNanos"), ("animal-observation", "tNanos")):
         for event_id in index.by_kind(kind).get("eventIds", []):
             p = _pointer(event_id)
             if not p:
@@ -1511,6 +1511,115 @@ def identify_vehicles_endpoint(sessionId: str, authorization: str | None = Heade
     return {"ok": True, "queued": sessionId}
 
 
+# --- Animal re-identification (pets and recurring wildlife) -------------------
+
+ANIMAL_LABELS = {"bird", "cat", "dog", "horse", "sheep", "cow", "bear", "elephant", "zebra", "giraffe"}
+
+
+def identify_animals(session_id: str, min_box_px: int = 40) -> dict:
+    """Cluster tracked animals by appearance, exactly like vehicles: where a
+    stored keyframe falls inside an animal track's lifetime, interpolate the box
+    (scaled to keyframe pixels), embed the crop, and assign it to a persistent
+    "animal" cluster — emitting an animal-observation parented to the track. A
+    household pet is the best case for the colour descriptor: one distinctive
+    animal recurring in the same places."""
+    import cv2
+    import numpy as np
+
+    import vehicle as veh
+
+    frames = []
+    for event_id in index.by_kind("scene-change").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p or _payload(p).get("sessionId") != session_id or not p.get("outputArtifactIds"):
+            continue
+        frames.append((_payload(p).get("tNanos", 0), p["outputArtifactIds"][0]))
+
+    tracks = []
+    for event_id in index.by_kind("track-segment").get("eventIds", []):
+        p = _pointer(event_id)
+        if not p:
+            continue
+        pl = _payload(p)
+        if pl.get("sessionId") != session_id or pl.get("label") not in ANIMAL_LABELS:
+            continue
+        tracks.append((pl["tStartNanos"], pl["tEndNanos"], pl["boxFirst"], pl["boxLast"],
+                       pl["label"], pl.get("trackId"), p))
+
+    emitted = 0
+    clusters_seen: "set[str]" = set()
+    for t_frame, artifact_id in frames:
+        overlapping = [t for t in tracks if t[0] <= t_frame <= t[1]]
+        if not overlapping:
+            continue
+        img = cv2.imdecode(np.frombuffer(da.get_bytes(artifact_id), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        H, W = img.shape[:2]
+        for t0, t1, bf, bl, label, track_id, tp in overlapping:
+            box = veh.interpolate_box(t_frame, t0, t1, bf, bl)          # detector 640x480 space
+            if min(box[2] - box[0], box[3] - box[1]) < min_box_px:
+                continue
+            x1, y1, x2, y2 = _scale_det_box(box, W, H)                  # -> keyframe pixels
+            crop = img[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+            embedding = veh.appearance_embedding(crop)
+            if not embedding:
+                continue
+            cluster_id, similarity = identities.assign("animal", embedding)
+            clusters_seen.add(cluster_id)
+            tpl = _payload(tp)
+            with ingest_lock:
+                if ingest_or_skip_duplicate(
+                    raw_payload={
+                        "kind": "raw-payload",
+                        "schema": "perception-animal-v0.1",
+                        "sessionId": session_id,
+                        "clusterId": cluster_id,
+                        "similarityPermille": similarity,
+                        "animalType": label,
+                        "trackId": track_id,
+                        "box": [x1, y1, x2, y2],
+                        "tNanos": t_frame,
+                        "observedAt": tpl.get("observedAt", "2026-01-01T00:00:00Z"),
+                    },
+                    observed_at=tpl.get("observedAt", "2026-01-01T00:00:00Z"),
+                    actor_path=["server", "percept-memory", "animal-id"],
+                    channel_path=[tp["channelPath"][0], tp["channelPath"][1], "identity"],
+                    value_kind="animal-observation",
+                    preview=f"{cluster_id} ({label})",
+                    provenance={
+                        "source": "percept-memory-server",
+                        "observedBy": "percept-memory",
+                        "ingestionPipeline": "event-trace-v0",
+                        "extractionRunId": "animal-appearance-v0@percept-memory",
+                    },
+                    parent_event_ids=[tp["eventId"]],
+                    root_event_id=tp["rootEventId"],
+                    input_event_ids=[tp["eventId"]],
+                ):
+                    emitted += 1
+    return {"ok": True, "observations": emitted, "clusters": len(clusters_seen)}
+
+
+animal_queue: "queue.Queue[str]" = queue.Queue()
+
+
+def animal_worker() -> None:
+    _worker_loop("animal-id", animal_queue, identify_animals)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=animal_worker, daemon=True, name="animal").start()
+
+
+@app.post("/identify-animals")
+def identify_animals_endpoint(sessionId: str, authorization: str | None = Header(None)) -> dict:
+    """Queue animal re-identification for a session's tracked animals."""
+    check_auth(authorization)
+    animal_queue.put(sessionId)
+    return {"ok": True, "queued": sessionId}
+
+
 # --- Re-classify low-signal COCO tracks with the open-vocabulary VLM ----------
 
 def reclassify_tracks(session_id: str, max_tracks: int = 14, min_box_px: int = 40) -> dict:
@@ -2052,24 +2161,32 @@ def enqueue_session_derivations() -> dict:
     scenes; any session can still be resolved by hand via the endpoints. Vehicle
     re-id is CPU-cheap (no VLM), so it auto-runs wherever there are vehicles."""
     present = _sessions_by_kind(
-        "face-observation", "vehicle-observation", "identity-resolution",
-        "speaker-attribution", "session-stop", "scene-change", "item-observation",
+        "face-observation", "vehicle-observation", "animal-observation",
+        "identity-resolution", "speaker-attribution", "session-stop",
+        "scene-change", "item-observation",
     )
     complete = present["session-stop"]          # only derive finished sessions
     tiled = {p.stem[len("tiles-"):] for p in DATA_ROOT.glob("tiles-*.json")}
-    # Sessions that actually contain cars/trucks/buses.
+    # Sessions that actually contain cars/trucks/buses (or tracked animals).
     veh_sessions = set()
+    animal_sessions = set()
     for event_id in index.by_kind("track-segment").get("eventIds", []):
         p = _pointer(event_id)
-        if p and _payload(p).get("label") in ("car", "truck", "bus"):
-            cp = p.get("channelPath") or []
-            if len(cp) >= 2:
-                veh_sessions.add(cp[1])
+        if not p:
+            continue
+        label = _payload(p).get("label")
+        cp = p.get("channelPath") or []
+        if len(cp) < 2:
+            continue
+        if label in ("car", "truck", "bus"):
+            veh_sessions.add(cp[1])
+        elif label in ANIMAL_LABELS:
+            animal_sessions.add(cp[1])
 
     # Persisted attempted-set so a session that yields no output (e.g. all
     # vehicles too small to crop) is not re-attempted every tick.
     done = _load_derived_state()
-    queued = {"resolve": [], "attribute": [], "vehicle": [], "items": []}
+    queued = {"resolve": [], "attribute": [], "vehicle": [], "animal": [], "items": []}
     marks = []
 
     def enqueue(kind: str, q: "queue.Queue", sids: set) -> None:
@@ -2106,6 +2223,7 @@ def enqueue_session_derivations() -> dict:
     enqueue("resolve", resolve_queue, ((tiled & present["face-observation"]) | face_rich) - present["identity-resolution"])
     enqueue("attribute", attribute_queue, tiled - present["speaker-attribution"])
     enqueue("vehicle", vehicle_queue, veh_sessions - present["vehicle-observation"])
+    enqueue("animal", animal_queue, animal_sessions - present["animal-observation"])
     if AUTO_ITEMS:
         enqueue("items", item_queue, present["scene-change"] - present["item-observation"])
     if marks:
