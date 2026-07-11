@@ -84,6 +84,26 @@ ITEM_PROMPT = (
 )
 
 
+ANIMAL_VERIFY_PROMPT = (
+    "Does this image clearly show a real, live animal? If yes, reply with ONLY "
+    "the animal type in one or two words (e.g. cat, dog, bird, cow, horse). If "
+    "no animal is clearly visible — trees, people, vehicles, objects, or "
+    "anything too blurry do NOT count — reply NONE."
+)
+
+
+def verify_animal(jpeg: bytes) -> str | None:
+    """Confirm a detector 'animal' track actually shows an animal and return the
+    VLM's species, or None. The COCO detector confabulates freely outside its
+    training distribution (trees -> 'elephant'), and its confidence score does
+    not separate real animals from junk — verification has to look again."""
+    raw = _generate(VLM_MODEL, ANIMAL_VERIFY_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
+    word = raw.strip().strip('".').splitlines()[0].strip().lower() if raw else ""
+    if not word or "none" in word or len(word.split()) > 2 or not word.replace(" ", "").isalpha():
+        return None
+    return word
+
+
 OBJECT_PROMPT = (
     "Name the single main object shown in this cropped image in 1-4 words. Be "
     "specific and include a brand or type if legible (e.g. 'potting soil bag', "

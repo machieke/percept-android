@@ -1516,13 +1516,15 @@ def identify_vehicles_endpoint(sessionId: str, authorization: str | None = Heade
 ANIMAL_LABELS = {"bird", "cat", "dog", "horse", "sheep", "cow", "bear", "elephant", "zebra", "giraffe"}
 
 
-def identify_animals(session_id: str, min_box_px: int = 40) -> dict:
-    """Cluster tracked animals by appearance, exactly like vehicles: where a
-    stored keyframe falls inside an animal track's lifetime, interpolate the box
-    (scaled to keyframe pixels), embed the crop, and assign it to a persistent
-    "animal" cluster — emitting an animal-observation parented to the track. A
-    household pet is the best case for the colour descriptor: one distinctive
-    animal recurring in the same places."""
+def identify_animals(session_id: str, min_box_px: int = 40, verify_cap: int = 8) -> dict:
+    """Cluster tracked animals by appearance, like vehicles — but VERIFIED: the
+    COCO detector confabulates freely outside its distribution (trees ->
+    'elephant', a blurred sofa -> 'cat') and its confidence score does not
+    separate real animals from junk, so each candidate track's best crop is
+    re-checked by the VLM first. Only confirmed tracks register observations,
+    carrying the VLM's species (cocoLabel kept for provenance); everything else
+    is dropped. A household pet is the best case for the colour descriptor: one
+    distinctive animal recurring in the same places."""
     import cv2
     import numpy as np
 
@@ -1546,8 +1548,8 @@ def identify_animals(session_id: str, min_box_px: int = 40) -> dict:
         tracks.append((pl["tStartNanos"], pl["tEndNanos"], pl["boxFirst"], pl["boxLast"],
                        pl["label"], pl.get("trackId"), p))
 
-    emitted = 0
-    clusters_seen: "set[str]" = set()
+    # Gather candidate crops grouped per track (the verification unit).
+    per_track: dict = {}
     for t_frame, artifact_id in frames:
         overlapping = [t for t in tracks if t[0] <= t_frame <= t[1]]
         if not overlapping:
@@ -1562,23 +1564,49 @@ def identify_animals(session_id: str, min_box_px: int = 40) -> dict:
                 continue
             x1, y1, x2, y2 = _scale_det_box(box, W, H)                  # -> keyframe pixels
             crop = img[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+            if not crop.size:
+                continue
+            per_track.setdefault(track_id, {"label": label, "tp": tp, "crops": []})
+            per_track[track_id]["crops"].append((crop.shape[0] * crop.shape[1], t_frame, [x1, y1, x2, y2], crop))
+
+    # Verify the largest tracks first, bounded per session.
+    ranked = sorted(per_track.items(), key=lambda kv: -max(c[0] for c in kv[1]["crops"]))
+    emitted = 0
+    verified_tracks = 0
+    clusters_seen: "set[str]" = set()
+    for track_id, cand in ranked[:verify_cap]:
+        cand["crops"].sort(key=lambda c: -c[0])
+        ok, buf = cv2.imencode(".jpg", cand["crops"][0][3], [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            continue
+        try:
+            species = enrichment.verify_animal(buf.tobytes())
+        except Exception as exc:  # noqa: BLE001
+            print(f"animal verify failed for track {track_id}: {exc}", flush=True)
+            continue
+        if not species:
+            continue
+        verified_tracks += 1
+        tp = cand["tp"]
+        tpl = _payload(tp)
+        for _, t_frame, box, crop in cand["crops"]:
             embedding = veh.appearance_embedding(crop)
             if not embedding:
                 continue
             cluster_id, similarity = identities.assign("animal", embedding)
             clusters_seen.add(cluster_id)
-            tpl = _payload(tp)
             with ingest_lock:
                 if ingest_or_skip_duplicate(
                     raw_payload={
                         "kind": "raw-payload",
-                        "schema": "perception-animal-v0.1",
+                        "schema": "perception-animal-v0.2",
                         "sessionId": session_id,
                         "clusterId": cluster_id,
                         "similarityPermille": similarity,
-                        "animalType": label,
+                        "animalType": species,
+                        "cocoLabel": cand["label"],
                         "trackId": track_id,
-                        "box": [x1, y1, x2, y2],
+                        "box": box,
                         "tNanos": t_frame,
                         "observedAt": tpl.get("observedAt", "2026-01-01T00:00:00Z"),
                     },
@@ -1586,19 +1614,20 @@ def identify_animals(session_id: str, min_box_px: int = 40) -> dict:
                     actor_path=["server", "percept-memory", "animal-id"],
                     channel_path=[tp["channelPath"][0], tp["channelPath"][1], "identity"],
                     value_kind="animal-observation",
-                    preview=f"{cluster_id} ({label})",
+                    preview=f"{cluster_id} ({species})",
                     provenance={
                         "source": "percept-memory-server",
                         "observedBy": "percept-memory",
                         "ingestionPipeline": "event-trace-v0",
-                        "extractionRunId": "animal-appearance-v0@percept-memory",
+                        "extractionRunId": f"animal-verified-v1+{enrichment.VLM_MODEL}",
                     },
                     parent_event_ids=[tp["eventId"]],
                     root_event_id=tp["rootEventId"],
                     input_event_ids=[tp["eventId"]],
                 ):
                     emitted += 1
-    return {"ok": True, "observations": emitted, "clusters": len(clusters_seen)}
+    return {"ok": True, "candidateTracks": len(per_track), "verifiedTracks": verified_tracks,
+            "observations": emitted, "clusters": len(clusters_seen)}
 
 
 animal_queue: "queue.Queue[str]" = queue.Queue()
