@@ -187,6 +187,61 @@ def transcribe_chunk(pointer: dict, force: bool = False) -> dict | None:
 identities = IdentityRegistry(DATA_ROOT / "identities.json")
 voiceprint_lock = threading.Lock()
 
+# --- Background-worker status (written to the volume for the trace browser) ---
+
+WORKER_STATUS_PATH = DATA_ROOT / "worker-status.json"
+_worker_status: dict = {}
+_status_lock = threading.Lock()
+_status_queues: dict = {}
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _status(name: str, **fields) -> None:
+    """Update one worker's status and persist the snapshot; the read-only
+    browser renders this file as the scheduled/background-task progress page."""
+    with _status_lock:
+        st = _worker_status.setdefault(name, {"done": 0, "errors": 0})
+        st.update(fields)
+        st["updatedAt"] = _now_iso()
+        snapshot = {
+            "writtenAt": _now_iso(),
+            "queues": {n: q.qsize() for n, q in _status_queues.items()},
+            "workers": _worker_status,
+        }
+        try:
+            tmp = WORKER_STATUS_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(snapshot))
+            tmp.replace(WORKER_STATUS_PATH)
+        except OSError:
+            pass
+
+
+def _worker_loop(name: str, work_queue: "queue.Queue", handler) -> None:
+    """Shared loop for all queue-fed workers: tracks state/current item/queue
+    depth/done/error counts for the status page, and keeps the best-effort
+    semantics (one failure never kills the worker)."""
+    _status_queues[name] = work_queue
+    _status(name, state="idle")
+    while True:
+        item = work_queue.get()
+        desc = str(item[0] if isinstance(item, tuple) else item)[:80]
+        _status(name, state="working", current=desc, startedAt=_now_iso())
+        try:
+            result = handler(item)
+            with _status_lock:
+                _worker_status[name]["done"] = _worker_status[name].get("done", 0) + 1
+            _status(name, state="idle", current=None, lastItem=desc, lastResult=str(result)[:200])
+            print(f"{name}: {desc} -> {str(result)[:160]}", flush=True)
+        except Exception as exc:  # noqa: BLE001 - workers are best-effort
+            with _status_lock:
+                _worker_status[name]["errors"] = _worker_status[name].get("errors", 0) + 1
+            _status(name, state="idle", current=None, lastError=f"{desc}: {exc}"[:200])
+            print(f"{name} failed for {desc}: {exc}", flush=True)
+
+
 
 def _pointer(event_id: str) -> dict | None:
     result = index.get_event(event_id)
@@ -609,23 +664,13 @@ def identity_worker() -> None:
     """Face + voice embeddings run on the ident service (~ms each), not ollama —
     so they get their own worker that races ahead of the slow VLM/LLM enrichment
     instead of being serialized behind each chunk's captions."""
-    while True:
-        item = identity_queue.get()
-        chunk_event_id, force = item if isinstance(item, tuple) else (item, False)
-        try:
-            identify_chunk(chunk_event_id, force=force)
-        except Exception as exc:  # noqa: BLE001 - identity is best-effort
-            print(f"identification failed for {chunk_event_id}: {exc}", flush=True)
+    _worker_loop("identity", identity_queue,
+                 lambda item: identify_chunk(*(item if isinstance(item, tuple) else (item, False))))
 
 
 def enrich_worker() -> None:
-    while True:
-        item = enrich_queue.get()
-        chunk_event_id, force = item if isinstance(item, tuple) else (item, False)
-        try:
-            enrich_chunk(chunk_event_id)
-        except Exception as exc:  # noqa: BLE001 - enrichment is best-effort
-            print(f"enrichment failed for {chunk_event_id}: {exc}", flush=True)
+    _worker_loop("enrich", enrich_queue,
+                 lambda item: enrich_chunk(item[0] if isinstance(item, tuple) else item))
 
 
 if IDENT_ENABLED:
@@ -1172,13 +1217,7 @@ resolve_queue: "queue.Queue[str]" = queue.Queue()
 
 
 def resolve_worker() -> None:
-    while True:
-        session_id = resolve_queue.get()
-        try:
-            resolved = resolve_names(session_id)
-            print(f"resolved names for {session_id}: {resolved}", flush=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"name resolution failed for {session_id}: {exc}", flush=True)
+    _worker_loop("resolve-names", resolve_queue, resolve_names)
 
 
 if ENRICH_ENABLED:
@@ -1320,13 +1359,7 @@ attribute_queue: "queue.Queue[str]" = queue.Queue()
 
 
 def attribute_worker() -> None:
-    while True:
-        session_id = attribute_queue.get()
-        try:
-            out = attribute_speakers(session_id)
-            print(f"attributed speakers for {session_id}: {out}", flush=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"speaker attribution failed for {session_id}: {exc}", flush=True)
+    _worker_loop("attribute-speakers", attribute_queue, attribute_speakers)
 
 
 if ENRICH_ENABLED:
@@ -1463,13 +1496,7 @@ vehicle_queue: "queue.Queue[str]" = queue.Queue()
 
 
 def vehicle_worker() -> None:
-    while True:
-        session_id = vehicle_queue.get()
-        try:
-            out = identify_vehicles(session_id)
-            print(f"identified vehicles for {session_id}: {out}", flush=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"vehicle identification failed for {session_id}: {exc}", flush=True)
+    _worker_loop("vehicle-id", vehicle_queue, identify_vehicles)
 
 
 if ENRICH_ENABLED:
@@ -1575,13 +1602,7 @@ reclassify_queue: "queue.Queue[str]" = queue.Queue()
 
 
 def reclassify_worker() -> None:
-    while True:
-        session_id = reclassify_queue.get()
-        try:
-            out = reclassify_tracks(session_id)
-            print(f"reclassified tracks for {session_id}: {out}", flush=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"track reclassification failed for {session_id}: {exc}", flush=True)
+    _worker_loop("reclassify-tracks", reclassify_queue, reclassify_tracks)
 
 
 if ENRICH_ENABLED:
@@ -1735,13 +1756,7 @@ place_queue: "queue.Queue[int]" = queue.Queue()
 
 
 def place_worker() -> None:
-    while True:
-        _ = place_queue.get()
-        try:
-            out = resolve_places()
-            print(f"resolved places: {out}", flush=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"place resolution failed: {exc}", flush=True)
+    _worker_loop("places", place_queue, lambda _item: resolve_places())
 
 
 if ENRICH_ENABLED:
@@ -1990,13 +2005,7 @@ item_queue: "queue.Queue[str]" = queue.Queue()
 
 
 def item_worker() -> None:
-    while True:
-        session_id = item_queue.get()
-        try:
-            out = identify_items(session_id)
-            print(f"identified items for {session_id}: {out}", flush=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"item identification failed for {session_id}: {exc}", flush=True)
+    _worker_loop("item-id", item_queue, identify_items)
 
 
 if ENRICH_ENABLED:
@@ -2128,6 +2137,7 @@ def periodic_worker() -> None:
     time.sleep(60)  # startup grace: let the index finish replaying
     while True:
         try:
+            _status("periodic", state="working")
             if AUTO_DERIVE:
                 q = enqueue_session_derivations()
                 if any(q.values()):
@@ -2146,6 +2156,7 @@ def periodic_worker() -> None:
             if vp_count != last_voiceprints and vp_count > 0:
                 out = rediarize()
                 print(f"periodic rediarize: {out}", flush=True)
+                _status("periodic", lastRediarize=str(out)[:180])
                 last_voiceprints = vp_count
             count = sum(len(index.by_kind(k).get("eventIds", []))
                         for k in ("face-observation", "speaker-observation", "vehicle-observation",
@@ -2154,9 +2165,12 @@ def periodic_worker() -> None:
                 out = run_reasoning()
                 new = sum(1 for c in out["conclusions"] if c["new"])
                 print(f"periodic reasoning: {new} new conclusions ({count} identity/asr events)", flush=True)
+                _status("periodic", lastReasoning=f"{new} new conclusions over {count} identity/asr events")
                 last_count = count
         except Exception as exc:  # noqa: BLE001
             print(f"periodic worker error: {exc}", flush=True)
+        _status("periodic", state="sleeping",
+                nextTickAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + REASON_INTERVAL_S)))
         time.sleep(REASON_INTERVAL_S)
 
 

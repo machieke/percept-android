@@ -221,6 +221,17 @@ def api_event(event_id: str) -> JSONResponse:
     })
 
 
+@app.get("/api/status")
+def api_status() -> JSONResponse:
+    """Background-worker status: the memory server's workers write a snapshot
+    (state, current item, queue depth, done/error counts, last result) to the
+    shared volume; this just serves it."""
+    try:
+        return JSONResponse(json.loads((DATA_ROOT / "worker-status.json").read_text()))
+    except Exception:
+        return JSONResponse({"writtenAt": None, "queues": {}, "workers": {}})
+
+
 @app.get("/api/entities")
 def api_entities() -> JSONResponse:
     """The resolved entity graph, assembled from the conclusion events already
@@ -474,7 +485,7 @@ INDEX_HTML = r"""<!doctype html><html><head><meta charset=utf-8>
  .member{border:1px solid var(--bd);border-radius:6px;padding:6px;margin:6px 0}
  .bar{height:4px;background:#0a0e14;border-radius:2px;overflow:hidden;margin:2px 0 5px} .bar>i{display:block;height:100%;background:var(--good)}
 </style></head><body>
-<header><b>percept</b> <span id=tabSessions class="tab on">sessions</span><span id=tabEntities class="tab">entities</span><span id=tabItems class="tab">items</span> <span class=mut id=stat></span>
+<header><b>percept</b> <span id=tabSessions class="tab on">sessions</span><span id=tabEntities class="tab">entities</span><span id=tabItems class="tab">items</span><span id=tabStatus class="tab">status</span> <span class=mut id=stat></span>
  <span style="margin-left:auto" class=mut>causal: <span class=lnk>parent</span> · child · <span style="color:var(--der)">derived</span> · <span style="color:var(--warn)">conclusion</span></span>
 </header>
 <main>
@@ -579,13 +590,15 @@ let mode='sessions';
 $('#tabSessions').onclick=()=>setMode('sessions');
 $('#tabEntities').onclick=()=>setMode('entities');
 $('#tabItems').onclick=()=>setMode('items');
+$('#tabStatus').onclick=()=>setMode('status');
 function setMode(m){
  mode=m;
  $('#tabSessions').classList.toggle('on',m==='sessions');
  $('#tabEntities').classList.toggle('on',m==='entities');
  $('#tabItems').classList.toggle('on',m==='items');
+ $('#tabStatus').classList.toggle('on',m==='status');
  $('#events').innerHTML='<div class=empty>—</div>'; $('#detail').innerHTML='<div class=empty>—</div>';
- if(m==='sessions') loadSessions(); else if(m==='entities') loadEntities(); else loadItems();
+ if(m==='sessions') loadSessions(); else if(m==='entities') loadEntities(); else if(m==='items') loadItems(); else loadStatus();
 }
 async function loadItems(){
  const r=await j('/api/items'); const box=$('#sessions'); box.innerHTML='';
@@ -669,7 +682,45 @@ async function openCluster(cid){
  D.appendChild(el(`<h3>${cid} — ${r.events.length} observations</h3>`));
  r.events.forEach(e=>{const d=el(`<div class=link-row><span class="k derived">${e.kind}</span> <span class=lnk>${escape(e.preview)}</span> <span class=b>${e.session}</span></div>`);d.onclick=()=>openEvent(e.id);D.appendChild(d);});
 }
+async function loadStatus(){
+ const d=await j('/api/status');
+ const L=$('#sessions'); L.innerHTML='';
+ const age=d.writtenAt?(Date.now()-Date.parse(d.writtenAt))/1000:1e9;
+ L.appendChild(el(`<h3>queues</h3>`));
+ const qs=Object.entries(d.queues||{});
+ qs.forEach(([n,depth])=>{
+  L.appendChild(el(`<div class=link-row><span class=${depth>0?'cnt':'mut'}>${depth}</span> <span class=mut>${n}</span></div>`));
+ });
+ const tot=qs.reduce((a,[,v])=>a+v,0);
+ L.appendChild(el(`<div class=emeta style="margin-top:8px">${tot} queued total</div>`));
+ if(age>150) L.appendChild(el(`<div class=emeta style="color:var(--warn);margin-top:8px">⚠ status is ${Math.round(age/60)} min old — server restarted or idle</div>`));
+ const M=$('#events'); M.innerHTML='';
+ M.appendChild(el('<h3>workers</h3>'));
+ const order=['periodic','identity','enrich','resolve-names','attribute-speakers','vehicle-id','item-id','reclassify-tracks','places'];
+ const workers=d.workers||{};
+ order.filter(w=>workers[w]).concat(Object.keys(workers).filter(w=>!order.includes(w))).forEach(w=>{
+  const st=workers[w];
+  const state=st.state||'?';
+  const col=state==='working'?'var(--good)':(state==='sleeping'?'var(--acc)':'var(--mut)');
+  const cur=state==='working'&&st.current?` — <span class=p>${escape(st.current)}</span>`:'';
+  let extra='';
+  if(st.lastResult) extra+=`<div class=emeta>last: ${escape(st.lastItem||'')} → ${escape(st.lastResult)}</div>`;
+  if(st.lastError) extra+=`<div class=emeta style="color:var(--warn)">error: ${escape(st.lastError)}</div>`;
+  if(st.lastRediarize) extra+=`<div class=emeta>rediarize: ${escape(st.lastRediarize)}</div>`;
+  if(st.lastReasoning) extra+=`<div class=emeta>reasoning: ${escape(st.lastReasoning)}</div>`;
+  if(st.nextTickAt) extra+=`<div class=emeta>next tick: ${escape(st.nextTickAt)}</div>`;
+  M.appendChild(el(`<div class=member>
+    <span class="k derived">${w}</span>
+    <span style="color:${col}">● ${state}</span>${cur}
+    <span class=emeta style="float:right">done ${st.done||0}${st.errors?` · <span style="color:var(--warn)">err ${st.errors}</span>`:''}</span>
+    ${extra}
+    <div class=emeta>updated ${escape(st.updatedAt||'')}</div></div>`));
+ });
+ $('#detail').innerHTML='<div class=empty>workers write their status to the volume; refreshes every 5 s</div>';
+ $('#stat').textContent=d.writtenAt?`· as of ${d.writtenAt}`:'· no status yet';
+}
 window.el=el;
 loadSessions();
 setInterval(()=>{ if(mode==='sessions') loadSessions(); }, 15000);
+setInterval(()=>{ if(mode==='status') loadStatus(); }, 5000);
 </script></body></html>"""
