@@ -2064,10 +2064,17 @@ def enqueue_session_derivations() -> dict:
     marks = []
 
     def enqueue(kind: str, q: "queue.Queue", sids: set) -> None:
+        # sids already excludes sessions that HAVE this derivation's output, so
+        # a session both marked done and still in sids was enqueued but never
+        # produced anything — its in-memory queue died with a restart. Requeue
+        # it once per process; genuinely-zero-output sessions retry once per
+        # boot, which is cheap and bounded.
         for sid in sorted(sids & complete):
             key = f"{sid}:{kind}"
             if key in done:
-                continue
+                if key in _requeued_this_boot:
+                    continue
+                _requeued_this_boot.add(key)
             q.put(sid)
             queued[kind].append(sid)
             marks.append(key)
@@ -2095,6 +2102,9 @@ def enqueue_session_derivations() -> dict:
     if marks:
         _save_derived_state(done | set(marks))
     return queued
+
+
+_requeued_this_boot: set = set()
 
 
 def _load_derived_state() -> set:
