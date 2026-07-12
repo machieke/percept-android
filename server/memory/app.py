@@ -2150,6 +2150,138 @@ def rediarize() -> dict:
             "sessionClusters": len(session_clusters), "speakers": len(clusters), "newObservations": emitted}
 
 
+# --- A/B harness: measured model swaps ----------------------------------------
+
+ab_queue: "queue.Queue" = queue.Queue()
+
+
+def ab_worker() -> None:
+    import ab as ab_harness
+
+    def handler(item):
+        suite, models = item
+        return ab_harness.run_suite(DATA_ROOT, suite, models)
+
+    _worker_loop("ab-test", ab_queue, handler)
+
+
+if ENRICH_ENABLED:
+    threading.Thread(target=ab_worker, daemon=True, name="ab").start()
+
+
+@app.post("/ab-test")
+async def ab_test_endpoint(request: Request, authorization: str | None = Header(None)) -> dict:
+    """Queue an A/B run. Body: {"suite": "verify-animal", "models": ["gemma3:4b",
+    "gemma4:12b"]}. Results persist to /data/ab-results and show in the log."""
+    check_auth(authorization)
+    import ab as ab_harness
+
+    body = await request.json()
+    suite = body.get("suite")
+    models = body.get("models") or []
+    if suite not in ab_harness.SUITES or not models:
+        raise HTTPException(status_code=400, detail=f"suite must be one of {sorted(ab_harness.SUITES)} with models[]")
+    ab_queue.put((suite, models))
+    return {"ok": True, "queued": suite, "models": models}
+
+
+@app.get("/ab-eval")
+def ab_eval_list(authorization: str | None = Header(None)) -> dict:
+    check_auth(authorization)
+    out = {}
+    root = DATA_ROOT / "ab-eval"
+    if root.exists():
+        for d in root.iterdir():
+            m = d / "manifest.json"
+            if m.exists():
+                items = json.loads(m.read_text())
+                out[d.name] = {"items": len(items),
+                               "byExpect": dict(__import__("collections").Counter(i["expect"] for i in items))}
+    return {"ok": True, "suites": out}
+
+
+@app.post("/ab-eval/add")
+def ab_eval_add(suite: str, eventId: str, expect: str,
+                authorization: str | None = Header(None)) -> dict:
+    """Grow an eval set from a real observation: crops the event's (padded) box
+    from its keyframe and stores it labeled with what it ACTUALLY was —
+    'none' for junk the model should reject. Spot-check in the browser, label
+    the mistakes here, and every future A/B scores against them."""
+    check_auth(authorization)
+    import cv2
+    import numpy as np
+
+    import ab as ab_harness
+
+    if suite not in ab_harness.SUITES:
+        raise HTTPException(status_code=400, detail=f"suite must be one of {sorted(ab_harness.SUITES)}")
+    p = _pointer(eventId)
+    if not p:
+        raise HTTPException(status_code=404, detail="unknown event")
+    pl = _payload(p)
+    box = pl.get("box")
+    session = pl.get("sessionId")
+    t = pl.get("tNanos") or pl.get("tStartNanos") or 0
+
+    artifact_cid = None
+    for parent in p.get("parentEventIds", []):
+        pp = _pointer(parent)
+        if pp and pp.get("outputArtifactIds"):
+            artifact_cid = pp["outputArtifactIds"][0]
+            break
+    if not artifact_cid:
+        best, best_dt = None, None
+        for event_id in index.by_kind("scene-change").get("eventIds", []):
+            q = _pointer(event_id)
+            if not q or not q.get("outputArtifactIds"):
+                continue
+            d = _payload(q)
+            if d.get("sessionId") != session:
+                continue
+            dt = abs(d.get("tNanos", 0) - t)
+            if best_dt is None or dt < best_dt:
+                best, best_dt = q, dt
+        if best:
+            artifact_cid = best["outputArtifactIds"][0]
+    if not artifact_cid:
+        raise HTTPException(status_code=404, detail="no keyframe for event")
+
+    img = cv2.imdecode(np.frombuffer(da.get_bytes(artifact_cid), np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=500, detail="keyframe decode failed")
+    H, W = img.shape[:2]
+    if box:
+        x1, y1, x2, y2 = (int(v) for v in box)
+        pw, ph = int((x2 - x1) * 0.75), int((y2 - y1) * 0.75)
+        crop = img[max(0, y1 - ph):min(H, y2 + ph), max(0, x1 - pw):min(W, x2 + pw)]
+    else:
+        crop = img
+    suite_dir = DATA_ROOT / "ab-eval" / suite
+    suite_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"{eventId.split(':')[-1][:16]}.jpg"
+    cv2.imwrite(str(suite_dir / fname), crop)
+    manifest_path = suite_dir / "manifest.json"
+    items = json.loads(manifest_path.read_text()) if manifest_path.exists() else []
+    items = [i for i in items if i["image"] != fname]
+    items.append({"image": fname, "expect": expect, "eventId": eventId})
+    manifest_path.write_text(json.dumps(items, indent=1))
+    return {"ok": True, "suite": suite, "image": fname, "expect": expect, "items": len(items)}
+
+
+@app.get("/ab-results")
+def ab_results(authorization: str | None = Header(None)) -> dict:
+    check_auth(authorization)
+    out = []
+    root = DATA_ROOT / "ab-results"
+    if root.exists():
+        for f in sorted(root.iterdir(), reverse=True)[:10]:
+            r = json.loads(f.read_text())
+            out.append({"file": f.name, "suite": r["suite"], "n": r["n"],
+                        "models": {m: {k: v for k, v in st.items() if k != "rows"}
+                                   for m, st in r["models"].items()}})
+    return {"ok": True, "results": out}
+
+
 @app.post("/rediarize")
 def rediarize_endpoint(authorization: str | None = Header(None)) -> dict:
     """Re-cluster all stored voiceprints globally and rebuild the speaker registry."""
