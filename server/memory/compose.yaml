@@ -15,6 +15,7 @@ services:
       - OLLAMA_URL=http://127.0.0.1:11434
       - VLM_MODEL=gemma3:4b
       - LLM_MODEL=gemma3:4b
+      - VERIFY_MODEL=gemma4:12b  # low-volume track verification only (<=8 calls/session)
       - REASON_INTERVAL_S=900     # tier 1: cheap reasoning sweep cadence (entities/conclusions)
       - AUTO_DERIVE=1             # tier 2: auto-run per-session derivations on new sessions
       # - AUTO_ITEMS=1           # also auto-run open-vocab VLM item id per session (heavy on CPU ollama)

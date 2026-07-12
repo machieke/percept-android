@@ -1456,7 +1456,12 @@ def identify_vehicles(session_id: str, min_box_px: int = 56, verify_cap: int = 8
             if not crop.size:
                 continue
             per_track.setdefault(track_id, {"label": label, "tp": tp, "crops": []})
-            per_track[track_id]["crops"].append((crop.shape[0] * crop.shape[1], t_frame, [x1, y1, x2, y2], crop))
+            # keep a context-padded variant for verification: a tight fur/blob
+            # fragment is unanswerable, the padded view shows the whole animal
+            # or reveals the windshield fixture.
+            pw, ph = int((x2 - x1) * 0.75), int((y2 - y1) * 0.75)
+            padded = img[max(0, y1 - ph):min(H, y2 + ph), max(0, x1 - pw):min(W, x2 + pw)]
+            per_track[track_id]["crops"].append((crop.shape[0] * crop.shape[1], t_frame, [x1, y1, x2, y2], crop, padded))
 
     fixtures = _camera_fixture_tracks(per_track, session_id)
     per_track = {tid: v for tid, v in per_track.items() if tid not in fixtures}
@@ -1467,7 +1472,7 @@ def identify_vehicles(session_id: str, min_box_px: int = 56, verify_cap: int = 8
     clusters_seen: "set[str]" = set()
     for track_id, cand in ranked[:verify_cap]:
         cand["crops"].sort(key=lambda c: -c[0])
-        ok, buf = cv2.imencode(".jpg", cand["crops"][0][3], [cv2.IMWRITE_JPEG_QUALITY, 92])
+        ok, buf = cv2.imencode(".jpg", cand["crops"][0][4], [cv2.IMWRITE_JPEG_QUALITY, 92])
         if not ok:
             continue
         try:
@@ -1480,7 +1485,7 @@ def identify_vehicles(session_id: str, min_box_px: int = 56, verify_cap: int = 8
         verified_tracks += 1
         tp = cand["tp"]
         tpl = _payload(tp)
-        for _, t_frame, box, crop in cand["crops"]:
+        for _, t_frame, box, crop, _padded in cand["crops"]:
             embedding = veh.appearance_embedding(crop)
             if not embedding:
                 continue
@@ -1637,7 +1642,12 @@ def identify_animals(session_id: str, min_box_px: int = 40, verify_cap: int = 8)
             if not crop.size:
                 continue
             per_track.setdefault(track_id, {"label": label, "tp": tp, "crops": []})
-            per_track[track_id]["crops"].append((crop.shape[0] * crop.shape[1], t_frame, [x1, y1, x2, y2], crop))
+            # keep a context-padded variant for verification: a tight fur/blob
+            # fragment is unanswerable, the padded view shows the whole animal
+            # or reveals the windshield fixture.
+            pw, ph = int((x2 - x1) * 0.75), int((y2 - y1) * 0.75)
+            padded = img[max(0, y1 - ph):min(H, y2 + ph), max(0, x1 - pw):min(W, x2 + pw)]
+            per_track[track_id]["crops"].append((crop.shape[0] * crop.shape[1], t_frame, [x1, y1, x2, y2], crop, padded))
 
     # Verify the largest tracks first, bounded per session.
     fixtures = _camera_fixture_tracks(per_track, session_id)
@@ -1649,7 +1659,7 @@ def identify_animals(session_id: str, min_box_px: int = 40, verify_cap: int = 8)
     clusters_seen: "set[str]" = set()
     for track_id, cand in ranked[:verify_cap]:
         cand["crops"].sort(key=lambda c: -c[0])
-        ok, buf = cv2.imencode(".jpg", cand["crops"][0][3], [cv2.IMWRITE_JPEG_QUALITY, 92])
+        ok, buf = cv2.imencode(".jpg", cand["crops"][0][4], [cv2.IMWRITE_JPEG_QUALITY, 92])
         if not ok:
             continue
         try:
@@ -1662,7 +1672,7 @@ def identify_animals(session_id: str, min_box_px: int = 40, verify_cap: int = 8)
         verified_tracks += 1
         tp = cand["tp"]
         tpl = _payload(tp)
-        for _, t_frame, box, crop in cand["crops"]:
+        for _, t_frame, box, crop, _padded in cand["crops"]:
             embedding = veh.appearance_embedding(crop)
             if not embedding:
                 continue

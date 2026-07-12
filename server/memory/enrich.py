@@ -17,6 +17,10 @@ import urllib.request
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
 VLM_MODEL = os.environ.get("VLM_MODEL", "gemma3:4b")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemma3:4b")
+# Verification is low-volume (<=8 calls/session), so it can afford a stronger,
+# slower model: on real failing crops gemma4:12b recognized a dog from a
+# context-padded fur crop and rejected clothes where gemma3:4b missed both.
+VERIFY_MODEL = os.environ.get("VERIFY_MODEL", VLM_MODEL)
 
 CAPTION_PROMPT = (
     "Describe what is visible in this image in one short factual sentence, "
@@ -99,7 +103,7 @@ def verify_animal(jpeg: bytes) -> str | None:
     VLM's species, or None. The COCO detector confabulates freely outside its
     training distribution (trees -> 'elephant'), and its confidence score does
     not separate real animals from junk — verification has to look again."""
-    raw = _generate(VLM_MODEL, ANIMAL_VERIFY_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
+    raw = _generate(VERIFY_MODEL, ANIMAL_VERIFY_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
     word = raw.strip().strip('".').splitlines()[0].strip().lower() if raw else ""
     if not word or "none" in word or len(word.split()) > 2 or not word.replace(" ", "").isalpha():
         return None
@@ -121,7 +125,7 @@ def verify_vehicle(jpeg: bytes) -> str | None:
     the VLM's colour+type description, or None. Same rationale as animals: the
     COCO detector confabulates outside its distribution and its confidence
     score does not separate real vehicles from junk."""
-    raw = _generate(VLM_MODEL, VEHICLE_VERIFY_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
+    raw = _generate(VERIFY_MODEL, VEHICLE_VERIFY_PROMPT, images=[base64.b64encode(jpeg).decode("ascii")])
     desc = raw.strip().strip('".').splitlines()[0].strip().lower() if raw else ""
     if not desc or "none" in desc.split() or len(desc) > 40 or not any(c.isalpha() for c in desc):
         return None
