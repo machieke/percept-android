@@ -62,6 +62,12 @@ class SceneChangeGate(
      *  "filling the frame" — ~6% of a 640x480 frame. */
     private val subjectMinAreaPx: Long = 18_000L,
     private val subjectIntervalNanos: Long = 2_000_000_000L,
+    /** COCO confabulates outside its distribution (a tree scores 'elephant', a
+     *  blob 'dog') and there is no VLM on-device to catch it — but such
+     *  false positives flicker or slide out of frame, while a real subject is
+     *  detected continuously. Require a salient subject of the SAME label to
+     *  persist this many consecutive frames before it triggers a capture. */
+    private val subjectHoldFrames: Int = 4,
 ) {
     init {
         require(luminanceThresholdPerMille in 0..1000) {
@@ -72,6 +78,7 @@ class SceneChangeGate(
         require(subjectMinScorePerMille in 0..1000) { "subjectMinScorePerMille must be in 0..1000" }
         require(subjectMinAreaPx >= 0) { "subjectMinAreaPx must be non-negative" }
         require(subjectIntervalNanos >= 0) { "subjectIntervalNanos must be non-negative" }
+        require(subjectHoldFrames >= 1) { "subjectHoldFrames must be >= 1" }
     }
 
     private var lastHistogram: LuminanceHistogram? = null
@@ -80,12 +87,24 @@ class SceneChangeGate(
     private var candidateFrames = 0
     private var lastSceneTNanos = 0L
     private var lastSubjectTNanos = Long.MIN_VALUE
+    private var salientSubjectLabel: String? = null
+    private var salientSubjectFrames = 0
     private var nextSceneIndex = 0
 
     fun process(frame: SceneGateFrame): SceneChange? {
         val previousHistogram = lastHistogram
         lastHistogram = frame.histogram
         val signature = detectionSetSignature(frame.detections)
+
+        // Track how long the same salient subject has persisted — a real
+        // subject holds across frames, a COCO false positive does not.
+        val salient = salientSubjectLabel(frame.detections)
+        if (salient != null && salient == salientSubjectLabel) {
+            salientSubjectFrames += 1
+        } else {
+            salientSubjectLabel = salient
+            salientSubjectFrames = if (salient != null) 1 else 0
+        }
 
         if (emittedSignature == null) {
             emittedSignature = signature
@@ -95,9 +114,10 @@ class SceneChangeGate(
 
         val cooledDown = frame.tNanos - lastSceneTNanos >= minIntervalNanos
 
-        // A salient subject fills the frame: capture it periodically even when
-        // the background (and thus the set/luminance gate) is unchanged.
-        if (cooledDown && hasSalientSubject(frame.detections) &&
+        // A salient subject has filled the frame for long enough to be real:
+        // capture it periodically even when the background (and thus the
+        // set/luminance gate) is unchanged.
+        if (cooledDown && salientSubjectFrames >= subjectHoldFrames &&
             frame.tNanos - lastSubjectTNanos >= subjectIntervalNanos
         ) {
             lastSubjectTNanos = frame.tNanos
@@ -154,12 +174,18 @@ class SceneChangeGate(
             .eachCount()
             .mapTo(sortedSetOf()) { (labelKey, count) -> "$labelKey:$count" }
 
-    private fun hasSalientSubject(detections: List<VideoDetection>): Boolean =
-        detections.any {
-            it.label in subjectLabels &&
-                it.scorePerMille >= subjectMinScorePerMille &&
-                it.box.area >= subjectMinAreaPx
-        }
+    /** Label of the largest subject detection that clears the score and area
+     *  floors, or null when none — the largest wins so the persistence tracker
+     *  follows the dominant subject rather than flickering between two. */
+    private fun salientSubjectLabel(detections: List<VideoDetection>): String? =
+        detections
+            .filter {
+                it.label in subjectLabels &&
+                    it.scorePerMille >= subjectMinScorePerMille &&
+                    it.box.area >= subjectMinAreaPx
+            }
+            .maxByOrNull { it.box.area }
+            ?.label
 
     companion object {
         /** COCO classes worth an identity: people, pets/wildlife, vehicles. */

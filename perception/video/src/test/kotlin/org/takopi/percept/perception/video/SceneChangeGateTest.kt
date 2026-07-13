@@ -90,28 +90,45 @@ class SceneChangeGateTest {
     fun salientSubjectFiresPeriodicallyWithUnchangedBackground() {
         // A dog fills the frame in a static room: same detection set, same
         // luminance — the set/luminance gate stays silent, but the subject
-        // gate must keep producing keyframes that contain the dog.
+        // gate must keep producing keyframes that contain the dog once it has
+        // persisted subjectHoldFrames frames.
         val gate = SceneChangeGate(
             luminanceThresholdPerMille = 900,
-            minIntervalNanos = 2_000_000_000L,
+            minIntervalNanos = 500_000_000L,
             subjectIntervalNanos = 2_000_000_000L,
+            subjectHoldFrames = 4,
         )
         val dog = VideoDetection("dog", "coco-80", 800, PixelBox(200, 150, 380, 350)) // 36000 px
+        fun frame(second: Long) = gate.process(sceneFrame(second, intArrayOf(10, 0), listOf(dog)))
 
-        gate.process(sceneFrame(0, intArrayOf(10, 0), listOf(dog))) // FIRST_FRAME
+        frame(0) // FIRST_FRAME (persist=1)
+        assertNull(frame(1)) // persist=2
+        assertNull(frame(2)) // persist=3
+        // persist=4 and interval elapsed: subject capture fires.
+        assertEquals(SceneChangeReason.SUBJECT_PRESENT, frame(3)?.reason)
         // Within the subject interval: no re-fire.
-        assertNull(gate.process(sceneFrame(1, intArrayOf(10, 0), listOf(dog))))
-        // Interval elapsed, background unchanged: subject capture fires.
-        assertEquals(
-            SceneChangeReason.SUBJECT_PRESENT,
-            gate.process(sceneFrame(2, intArrayOf(10, 0), listOf(dog)))?.reason,
+        assertNull(frame(4))
+        // Interval elapsed again: fires.
+        assertEquals(SceneChangeReason.SUBJECT_PRESENT, frame(5)?.reason)
+    }
+
+    @Test
+    fun flickeringSubjectNeverFires() {
+        // A COCO false positive (tree scored 'elephant') blinks on and off:
+        // it never persists subjectHoldFrames consecutive frames, so it never
+        // triggers a capture.
+        val gate = SceneChangeGate(
+            luminanceThresholdPerMille = 900,
+            minIntervalNanos = 0,
+            subjectIntervalNanos = 0,
+            subjectHoldFrames = 4,
         )
-        // And again the next interval.
-        assertNull(gate.process(sceneFrame(3, intArrayOf(10, 0), listOf(dog))))
-        assertEquals(
-            SceneChangeReason.SUBJECT_PRESENT,
-            gate.process(sceneFrame(4, intArrayOf(10, 0), listOf(dog)))?.reason,
-        )
+        val elephant = VideoDetection("elephant", "coco-80", 700, PixelBox(200, 100, 440, 400))
+        gate.process(sceneFrame(0, intArrayOf(10, 0), emptyList()))
+        for (second in 1..12) {
+            val dets = if (second % 2 == 0) listOf(elephant) else emptyList()
+            assertNull(gate.process(sceneFrame(second.toLong(), intArrayOf(10, 0), dets)))
+        }
     }
 
     @Test
