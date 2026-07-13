@@ -26,5 +26,6 @@ dependencies {
     implementation(project(":core:trace"))
     implementation(libs.camerax.core)
     implementation(libs.mediapipe.tasks.vision)
+    implementation(libs.tensorflow.lite)
     testImplementation(libs.junit)
 }

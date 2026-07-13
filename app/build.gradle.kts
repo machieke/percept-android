@@ -195,8 +195,8 @@ android {
         applicationId = "org.takopi.percept"
         minSdk = 31
         targetSdk = 34
-        versionCode = 45
-        versionName = "0.4.5"
+        versionCode = 46
+        versionName = "0.4.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

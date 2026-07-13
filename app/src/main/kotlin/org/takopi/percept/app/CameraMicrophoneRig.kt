@@ -23,7 +23,9 @@ import org.takopi.percept.perception.audio.SherpaZipformerAsrEngine
 import org.takopi.percept.perception.audio.TfLiteYamnetTagger
 import org.takopi.percept.perception.audio.NativeWhisper
 import org.takopi.percept.perception.video.FrameRateGovernor
+import org.takopi.percept.perception.video.FrameDetector
 import org.takopi.percept.perception.video.MediaPipeFrameDetector
+import org.takopi.percept.perception.video.YoloTfliteFrameDetector
 import org.takopi.percept.perception.video.PerceptFrameAnalyzer
 import org.takopi.percept.perception.video.SceneChangeGate
 import org.takopi.percept.perception.video.ThermalLevel
@@ -45,8 +47,25 @@ class CameraMicrophoneRig(
     private val onError: ((String) -> Unit)? = null,
 ) : PerceptionRig {
     private val settings = PerceptSettings(context)
-    private val detector =
-        if (settings.captureVideo) MediaPipeFrameDetector.createWithFallback(context) else null
+    private val detector = if (settings.captureVideo) createDetector() else null
+
+    /**
+     * EfficientDet-Lite0 (MediaPipe) is the validated default. The opt-in
+     * YOLO11n path won a server-side A/B but is unvalidated on-device, so if it
+     * fails to load (missing model asset, delegate init) fall back to the
+     * default rather than losing video capture.
+     */
+    private fun createDetector(): FrameDetector =
+        if (settings.useYoloDetector) {
+            try {
+                YoloTfliteFrameDetector.create(context)
+            } catch (t: Throwable) {
+                onError?.invoke("YOLO detector unavailable, using EfficientDet: ${t.message}")
+                MediaPipeFrameDetector.createWithFallback(context)
+            }
+        } else {
+            MediaPipeFrameDetector.createWithFallback(context)
+        }
     private val tagger =
         if (settings.captureAudioTags) TfLiteYamnetTagger.create(context) else null
     private val asrPair =

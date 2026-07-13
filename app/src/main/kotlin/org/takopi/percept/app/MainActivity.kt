@@ -307,6 +307,11 @@ private fun CaptureSettingsSection(settings: PerceptSettings, enabled: Boolean) 
         { settings.videoResolution },
         { settings.videoResolution = it },
     )
+    toggle(
+        "Experimental: YOLO11n detector (falls back to default if unavailable)",
+        { settings.useYoloDetector },
+        { settings.useYoloDetector = it },
+    )
 }
 
 /** Bundle zips live in app-scoped storage other apps cannot browse; a share

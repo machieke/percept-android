@@ -36,6 +36,18 @@ class PerceptSettings(context: Context) {
     var captureNetwork: Boolean by BoolPref("captureNetwork")
     var capturePower: Boolean by BoolPref("capturePower")
 
+    /**
+     * Opt-in on-device detector swap: YOLO11n (TFLite) instead of the default
+     * EfficientDet-Lite0. YOLO11n won a server-side A/B decisively (animal
+     * precision 0.33→1.0, zero false positives), but its on-device inference is
+     * unvalidated on this hardware, so it stays OFF by default — enable it,
+     * record a session, and compare against the server (which runs the same
+     * model as ground truth). Defaults to false unlike the capture toggles.
+     */
+    var useYoloDetector: Boolean
+        get() = prefs.getBoolean("useYoloDetector", false)
+        set(value) = prefs.edit().putBoolean("useYoloDetector", value).apply()
+
     /** True when any audio-consuming feature is on (mic opens at all). */
     val captureMicrophone: Boolean
         get() = captureAsr || captureAudioTags || captureAudioChunks
