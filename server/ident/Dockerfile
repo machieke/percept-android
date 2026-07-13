@@ -15,6 +15,8 @@ RUN pip install --no-cache-dir \
     opencv-python-headless==4.10.0.84
 
 WORKDIR /app
+# Baked into the image (not the /models named volume) so it is always present.
+COPY models/yolo11n.onnx /opt/models/yolo11n.onnx
 COPY app.py entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
