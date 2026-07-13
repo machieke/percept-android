@@ -25,6 +25,7 @@ import org.takopi.percept.perception.audio.AudioTagger
 import org.takopi.percept.perception.audio.EnergyVad
 import org.takopi.percept.perception.audio.meanAbsoluteLevelPerMille
 import org.takopi.percept.perception.video.FrameObservation
+import org.takopi.percept.perception.video.SceneChangeGate
 import org.takopi.percept.perception.video.LuminanceHistogram
 import org.takopi.percept.perception.video.PixelBox
 import org.takopi.percept.perception.video.VideoDetection
@@ -128,8 +129,13 @@ private class SyntheticEngineRig : PerceptionRig {
 
     override fun stop(): PerceptionRunCounters = checkNotNull(counters) { "rig not started" }
 
-    /** 300 frames at 10 fps: person throughout, cup joins at 15 s (scene change). */
-    private fun runVideo(sink: TraceSink) = VideoPerceptionEngine(sink).let { engine ->
+    /** 300 frames at 10 fps: person throughout, cup joins at 15 s (scene change).
+     *  Subject-triggered capture is disabled here (it has its own gate unit
+     *  tests) so this stays a minimal, deterministic reference-bundle fixture —
+     *  otherwise the always-present person would add a periodic keyframe every
+     *  few seconds. */
+    private fun runVideo(sink: TraceSink) =
+        VideoPerceptionEngine(sink, gate = SceneChangeGate(subjectLabels = emptySet())).let { engine ->
         val histogram = LuminanceHistogram(IntArray(8) { 100 })
         for (frameIndex in 0 until 300) {
             val tNanos = frameIndex * 100_000_000L

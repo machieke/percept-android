@@ -34,6 +34,7 @@ enum class SceneChangeReason {
     FIRST_FRAME,
     DETECTION_SET_CHANGE,
     LUMINANCE_DISTANCE,
+    SUBJECT_PRESENT,
 }
 
 /**
@@ -42,11 +43,25 @@ enum class SceneChangeReason {
  * after holding for [signatureHoldFrames] consecutive frames, and no two
  * scene changes fire within [minIntervalNanos] (a real Moto G84 session
  * produced 32 scene changes in 48 frames without this).
+ *
+ * Subject-triggered capture: the set/luminance gate keys on the *background*
+ * changing, so a dog playing in a static room, or a face at a still gathering,
+ * never triggers a keyframe — the phone tracks the subject at frame rate but
+ * saves no frame containing it, and downstream identification starves. So
+ * while a large, high-confidence [subjectLabels] detection fills the frame,
+ * fire a keyframe every [subjectIntervalNanos] regardless of background, so
+ * the trace holds frames that actually contain the subject.
  */
 class SceneChangeGate(
     private val luminanceThresholdPerMille: Int = 250,
     private val signatureHoldFrames: Int = 3,
     private val minIntervalNanos: Long = 2_000_000_000L,
+    private val subjectLabels: Set<String> = DEFAULT_SUBJECT_LABELS,
+    private val subjectMinScorePerMille: Int = 500,
+    /** Box area (detector model space, ~640x480) above which a subject is
+     *  "filling the frame" — ~6% of a 640x480 frame. */
+    private val subjectMinAreaPx: Long = 18_000L,
+    private val subjectIntervalNanos: Long = 2_000_000_000L,
 ) {
     init {
         require(luminanceThresholdPerMille in 0..1000) {
@@ -54,6 +69,9 @@ class SceneChangeGate(
         }
         require(signatureHoldFrames >= 1) { "signatureHoldFrames must be >= 1" }
         require(minIntervalNanos >= 0) { "minIntervalNanos must be non-negative" }
+        require(subjectMinScorePerMille in 0..1000) { "subjectMinScorePerMille must be in 0..1000" }
+        require(subjectMinAreaPx >= 0) { "subjectMinAreaPx must be non-negative" }
+        require(subjectIntervalNanos >= 0) { "subjectIntervalNanos must be non-negative" }
     }
 
     private var lastHistogram: LuminanceHistogram? = null
@@ -61,6 +79,7 @@ class SceneChangeGate(
     private var candidateSignature: Set<String>? = null
     private var candidateFrames = 0
     private var lastSceneTNanos = 0L
+    private var lastSubjectTNanos = Long.MIN_VALUE
     private var nextSceneIndex = 0
 
     fun process(frame: SceneGateFrame): SceneChange? {
@@ -70,10 +89,20 @@ class SceneChangeGate(
 
         if (emittedSignature == null) {
             emittedSignature = signature
+            lastSubjectTNanos = frame.tNanos
             return sceneChange(frame.tNanos, 1000, SceneChangeReason.FIRST_FRAME)
         }
 
         val cooledDown = frame.tNanos - lastSceneTNanos >= minIntervalNanos
+
+        // A salient subject fills the frame: capture it periodically even when
+        // the background (and thus the set/luminance gate) is unchanged.
+        if (cooledDown && hasSalientSubject(frame.detections) &&
+            frame.tNanos - lastSubjectTNanos >= subjectIntervalNanos
+        ) {
+            lastSubjectTNanos = frame.tNanos
+            return sceneChange(frame.tNanos, 1000, SceneChangeReason.SUBJECT_PRESENT)
+        }
 
         if (previousHistogram != null && cooledDown) {
             val distance = l1DistancePerMille(previousHistogram, frame.histogram)
@@ -124,6 +153,22 @@ class SceneChangeGate(
             .groupingBy { "${it.labelSpace}:${it.label}" }
             .eachCount()
             .mapTo(sortedSetOf()) { (labelKey, count) -> "$labelKey:$count" }
+
+    private fun hasSalientSubject(detections: List<VideoDetection>): Boolean =
+        detections.any {
+            it.label in subjectLabels &&
+                it.scorePerMille >= subjectMinScorePerMille &&
+                it.box.area >= subjectMinAreaPx
+        }
+
+    companion object {
+        /** COCO classes worth an identity: people, pets/wildlife, vehicles. */
+        val DEFAULT_SUBJECT_LABELS: Set<String> = setOf(
+            "person",
+            "cat", "dog", "bird", "horse", "sheep", "cow", "bear", "elephant", "zebra", "giraffe",
+            "car", "truck", "bus", "motorcycle", "bicycle",
+        )
+    }
 }
 
 fun l1DistancePerMille(a: LuminanceHistogram, b: LuminanceHistogram): Int {

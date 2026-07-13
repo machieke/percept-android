@@ -11,6 +11,7 @@ class SceneChangeGateTest {
             luminanceThresholdPerMille = 250,
             signatureHoldFrames = 1,
             minIntervalNanos = 0,
+            subjectLabels = emptySet(),
         )
 
         assertEquals(SceneChangeReason.FIRST_FRAME, gate.process(sceneFrame(0, intArrayOf(10, 0), emptyList()))?.reason)
@@ -27,7 +28,7 @@ class SceneChangeGateTest {
 
     @Test
     fun movingSameDetectionDoesNotTriggerDetectionSetChange() {
-        val gate = SceneChangeGate(luminanceThresholdPerMille = 900)
+        val gate = SceneChangeGate(luminanceThresholdPerMille = 900, subjectLabels = emptySet())
 
         gate.process(sceneFrame(0, intArrayOf(10, 0), listOf(detection(x1 = 100))))
 
@@ -36,7 +37,7 @@ class SceneChangeGateTest {
 
     @Test
     fun flickeringDetectionNeverFiresSetChange() {
-        val gate = SceneChangeGate(luminanceThresholdPerMille = 900, signatureHoldFrames = 3)
+        val gate = SceneChangeGate(luminanceThresholdPerMille = 900, signatureHoldFrames = 3, subjectLabels = emptySet())
         gate.process(sceneFrame(0, intArrayOf(10, 0), emptyList()))
 
         // A marginal detection blinking on/off never holds for 3 frames.
@@ -48,7 +49,7 @@ class SceneChangeGateTest {
 
     @Test
     fun heldSignatureChangeFiresAfterHoldFrames() {
-        val gate = SceneChangeGate(luminanceThresholdPerMille = 900, signatureHoldFrames = 3)
+        val gate = SceneChangeGate(luminanceThresholdPerMille = 900, signatureHoldFrames = 3, subjectLabels = emptySet())
         gate.process(sceneFrame(0, intArrayOf(10, 0), emptyList()))
 
         assertNull(gate.process(sceneFrame(3, intArrayOf(10, 0), listOf(detection()))))
@@ -70,6 +71,7 @@ class SceneChangeGateTest {
             luminanceThresholdPerMille = 250,
             signatureHoldFrames = 1,
             minIntervalNanos = 2_000_000_000L,
+            subjectLabels = emptySet(),
         )
         gate.process(sceneFrame(0, intArrayOf(10, 0), emptyList()))
 
@@ -82,6 +84,46 @@ class SceneChangeGateTest {
             SceneChangeReason.DETECTION_SET_CHANGE,
             gate.process(sceneFrame(2, intArrayOf(0, 10), listOf(detection())))?.reason,
         )
+    }
+
+    @Test
+    fun salientSubjectFiresPeriodicallyWithUnchangedBackground() {
+        // A dog fills the frame in a static room: same detection set, same
+        // luminance — the set/luminance gate stays silent, but the subject
+        // gate must keep producing keyframes that contain the dog.
+        val gate = SceneChangeGate(
+            luminanceThresholdPerMille = 900,
+            minIntervalNanos = 2_000_000_000L,
+            subjectIntervalNanos = 2_000_000_000L,
+        )
+        val dog = VideoDetection("dog", "coco-80", 800, PixelBox(200, 150, 380, 350)) // 36000 px
+
+        gate.process(sceneFrame(0, intArrayOf(10, 0), listOf(dog))) // FIRST_FRAME
+        // Within the subject interval: no re-fire.
+        assertNull(gate.process(sceneFrame(1, intArrayOf(10, 0), listOf(dog))))
+        // Interval elapsed, background unchanged: subject capture fires.
+        assertEquals(
+            SceneChangeReason.SUBJECT_PRESENT,
+            gate.process(sceneFrame(2, intArrayOf(10, 0), listOf(dog)))?.reason,
+        )
+        // And again the next interval.
+        assertNull(gate.process(sceneFrame(3, intArrayOf(10, 0), listOf(dog))))
+        assertEquals(
+            SceneChangeReason.SUBJECT_PRESENT,
+            gate.process(sceneFrame(4, intArrayOf(10, 0), listOf(dog)))?.reason,
+        )
+    }
+
+    @Test
+    fun smallOrLowConfidenceSubjectDoesNotFire() {
+        val gate = SceneChangeGate(luminanceThresholdPerMille = 900, minIntervalNanos = 0)
+        gate.process(sceneFrame(0, intArrayOf(10, 0), emptyList()))
+        // A distant, tiny dog (below area threshold) is not a capture subject.
+        val tinyDog = VideoDetection("dog", "coco-80", 800, PixelBox(200, 150, 260, 210)) // 3600 px
+        assertNull(gate.process(sceneFrame(2, intArrayOf(10, 0), listOf(tinyDog))))
+        // A large but low-confidence detection is not either.
+        val faintDog = VideoDetection("dog", "coco-80", 300, PixelBox(200, 150, 400, 380)) // 46000 px, score 300
+        assertNull(gate.process(sceneFrame(4, intArrayOf(10, 0), listOf(faintDog))))
     }
 
     @Test
