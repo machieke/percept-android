@@ -25,3 +25,7 @@ services:
 
 volumes:
   percept-memory-data:
+    # Pinned to the existing physical volume (the trace) so it is reused
+    # identically standalone (project "memory") and under the unified root
+    # (project "percept") — the browser mounts this same physical volume.
+    name: memory_percept-memory-data

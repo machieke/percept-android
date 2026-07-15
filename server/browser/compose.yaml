@@ -5,7 +5,7 @@ services:
     # Read-only view of the memory server's data volume — the browser can never
     # mutate the trace, only read pointers.jsonl and the content-addressed store.
     volumes:
-      - percept-memory-data:/data:ro
+      - memory-data-ro:/data:ro
     environment:
       - DATA_ROOT=/data
     ports:
@@ -13,7 +13,10 @@ services:
     restart: unless-stopped
 
 volumes:
-  # Created by server/memory/compose.yaml (project "memory").
-  percept-memory-data:
+  # The memory server's trace, mounted read-only. Distinct compose key from
+  # memory's own volume so the two definitions do not collide when both files
+  # merge into the unified root project; both resolve to the same physical
+  # volume via the pinned name.
+  memory-data-ro:
     external: true
     name: memory_percept-memory-data

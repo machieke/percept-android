@@ -1,0 +1,19 @@
+# Unified entry point for the four percept server services. Each service still
+# has its own compose file in its directory (and can be managed standalone with
+# `cd server/<svc> && docker compose ...`); this pulls them into one project so
+# `cd server && docker compose up -d` / `down` manages them together.
+#
+# Container names (container_name:) and volume names (pinned via `name:`) are
+# fixed in each included file, so a service resolves to the SAME container and
+# volume whether started here or standalone — no orphaned trace volume, no
+# duplicate containers when switching between the two.
+#
+# Order places memory before browser (browser mounts memory's data volume) and
+# after asr/ident (memory's enrichment worker talks to them over host loopback).
+name: percept
+
+include:
+  - asr/compose.yaml
+  - ident/compose.yaml
+  - memory/compose.yaml
+  - browser/compose.yaml

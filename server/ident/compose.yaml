@@ -12,3 +12,6 @@ services:
 
 volumes:
   percept-ident-models:
+    # Pinned to the existing physical volume so this resolves identically
+    # standalone (project "ident") and under the unified root (project "percept").
+    name: ident_percept-ident-models

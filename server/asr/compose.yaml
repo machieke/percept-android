@@ -12,3 +12,6 @@ services:
 
 volumes:
   percept-asr-models:
+    # Pinned to the existing physical volume so this resolves identically
+    # standalone (project "asr") and under the unified root (project "percept").
+    name: asr_percept-asr-models
